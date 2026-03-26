@@ -1,0 +1,14 @@
+# Exam questions (NDA)
+questions.md
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
