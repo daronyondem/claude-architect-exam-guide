@@ -1,6 +1,6 @@
-# Claude Certified Architect – Foundations: Exam Preparation Guide
+# Claude Certified Architect - Foundations: Exam Preparation Guide
 
-A comprehensive study guide for developers and solution architects preparing for the **Claude Certified Architect – Foundations** certification exam.
+A comprehensive study guide for developers and solution architects preparing for the **Claude Certified Architect - Foundations** certification exam.
 
 ## Who Is This For?
 
@@ -8,21 +8,23 @@ This guide is designed for developers and solution architects who are **new to t
 
 ## What Does It Cover?
 
-The guide covers seven interconnected knowledge areas:
+The guide covers interconnected knowledge areas:
 
-1. **Designing Tool Interfaces for LLM Agents** — parameter design, structured output, tool composition, confirmation flows
-2. **Error Handling in Agent Tools** — transient vs. permanent errors, structured error responses, uncertain state, MCP error patterns
-3. **Conversation Context Management** — stateless API fundamentals, progressive summarization, state objects, stale data handling
-4. **System Prompt Engineering** — structure, principles vs. conditionals, dilution, few-shot examples
-5. **Model Context Protocol (MCP)** — architecture, trust model, tool descriptions, multi-server availability
-6. **Agentic Patterns & Task Decomposition** — prompt chaining, routing, orchestrator-workers, dynamic decomposition
-7. **Agentic Workflow Design** — escalation, compliance enforcement, graceful degradation, handoff design
+1. **API fundamentals and output control** - stateless requests, tool choice, structured outputs, response prefill
+2. **Designing tool interfaces for LLM agents** - parameter design, structured output, tool composition, confirmation flows
+3. **Error handling in agent tools** - transient vs. permanent errors, structured error responses, uncertain state, MCP error patterns
+4. **Structured data extraction and validation** - schemas, nullability, semantic validation, provenance, human review
+5. **Conversation context management** - progressive summarization, state objects, retrieval, stale data handling
+6. **System prompt engineering** - structure, principles vs. conditionals, dilution, few-shot examples
+7. **Model Context Protocol (MCP)** - tools, resources, prompts, trust model, tool descriptions, configuration scopes
+8. **Agentic patterns and multi-agent workflows** - prompt chaining, routing, orchestrator-workers, subagents, provenance
+9. **Customer service workflow design** - escalation, compliance enforcement, graceful degradation, handoff design
+10. **Claude Code and Agent SDK workflows** - built-in tools, plan mode, sessions, memory, slash commands, hooks
+11. **Evaluation, feedback loops, and batch processing** - validation, false-positive reduction, Message Batches, cost/latency trade-offs
 
 Each section includes:
-- **What to Know** — core concepts explained as teaching material
-- **Key Relationships** — how the area connects to others
-- **Common Pitfalls** — misconceptions and subtle distinctions
-- **Go Deeper** — sub-topics that deserve extra attention
+- **What to Know** - core concepts explained as teaching material
+- **Common Pitfalls** - misconceptions and subtle distinctions
 
 Plus a **Study Strategy**, **Quick Reference Cheat Sheet**, and **Recommended Reading & Resources** with links to official documentation.
 
@@ -32,7 +34,7 @@ Plus a **Study Strategy**, **Quick Reference Cheat Sheet**, and **Recommended Re
 
 ## Disclaimer
 
-This is an **independent, community-created** study guide. It is not affiliated with, endorsed by, or sponsored by Anthropic. No exam questions are included, paraphrased, or hinted at — this guide teaches the underlying knowledge domains only.
+This is an **independent, community-created** study guide. It is not affiliated with, endorsed by, or sponsored by Anthropic. No exam questions are included, paraphrased, or hinted at - this guide teaches the underlying knowledge domains only.
 
 The guide was authored with assistance from Claude.
 
