@@ -45,9 +45,13 @@ For exam-style architecture questions, the key principle is stable: schema-backe
 | Setting | Meaning | Use Case |
 |---|---|---|
 | `auto` | Claude may call a tool or answer normally | General agents where tool use is optional |
-| `any` | Claude must call one of the provided tools | Extraction where the document type is unknown but one extraction tool must be used |
+| `any` | Claude must call one of the provided tools | Extraction where the document type is unknown but one extraction tool from a defined set must be used |
 | `tool` | Claude must call a specific named tool | A pipeline stage that must produce one schema before enrichment |
 | `none` | Claude cannot call tools | Pure text response or a step where tools are unsafe/unneeded |
+
+`tool_choice: "any"` is especially useful when you have several extraction tools (one per document type) and you want guaranteed tool use without choosing which schema in advance. Setting `auto` with prompt instructions to "use a tool" can still produce conversational text in edge cases; `any` cannot.
+
+When multiple tools are available but one must run first, use `tool_choice` with a specific tool name (e.g., `{"type": "tool", "name": "extract_metadata"}`) for the first call, receive the structured result, then make subsequent calls for enrichment. Reordering tool definitions or relying on system prompt priority is unreliable.
 
 For extraction systems, common patterns are:
 
@@ -55,9 +59,9 @@ For extraction systems, common patterns are:
 2. Define an extraction tool whose input schema is the desired output schema when the extraction is modeled as a tool call.
 3. Set `tool_choice` to a required tool or to `any` across several extraction tools when a tool call must happen.
 4. Validate the result in application code.
-5. If semantic validation fails, call Claude again with the source, the invalid extraction, and the validation errors.
+5. If semantic validation fails, call Claude again with the source, the invalid extraction, and the validation errors. This validation-error feedback loop is far more effective than retrying the same prompt unchanged.
 
-Tool definitions, tool schemas, output schemas, and tool-use/result blocks count as input tokens or add injected prompt overhead. A large schema can push long-document extraction close to the context limit, even if the document itself seems to fit.
+Tool definitions, tool schemas, output schemas, and tool-use/result blocks count as input tokens or add injected prompt overhead. A large schema (for example, a 12-field tool definition with detailed descriptions consuming ~2,500 tokens) combined with a long document can approach the context limit. When that happens, accuracy degrades on content near the end of the document because the model is processing close to the effective attention boundary. The root cause is total context consumption, not a model defect.
 
 Structured outputs also have operational implications: the first request for a schema may have additional latency while the grammar is compiled; schemas are cached for reuse; very complex schemas can exceed compilation limits; refusals or max-token stops can still produce nonconforming output. Do not treat schema compliance as a substitute for domain validation.
 
@@ -65,12 +69,23 @@ Structured outputs also have operational implications: the first request for a s
 
 Claude can continue from a partially filled assistant response in some API patterns. This can be useful for response format control, such as starting directly with `{` for text JSON-style output or preventing repetitive greetings by providing a concise opening. Use this carefully: schema-constrained tool use is usually better than relying on text prefill for machine-readable output.
 
+### Token Growth in Extended Conversations
+
+Each new turn includes the entire conversation history in the request. As conversations grow:
+
+- Input token count rises with every message.
+- Latency rises proportionally because the model must attend to more input.
+- Per-turn cost rises.
+
+If users notice slower responses and higher costs in long sessions, the cause is almost always input token growth, not a defect in the model or database. Context management strategies (sliding window, progressive summarization, structured state) address this directly.
+
 ### Common Pitfalls
 
 - **Assuming Claude has persistent memory.** It does not. Your app manages state and history.
 - **Treating `session_id` as model memory.** A session identifier can locate stored context in your system, but it does not automatically change what Claude sees.
 - **Forcing text JSON with prompt instructions when tool use is available.** Prompt-only JSON is more fragile than schema-backed tool use.
 - **Ignoring tool-definition token cost.** Large tool schemas reduce the remaining budget for documents, conversation, and outputs.
+- **Confusing `tool_choice: "auto"` with required tool use.** `auto` allows tools; only `any` or a named tool guarantees a tool call.
 
 ### Original Example
 
@@ -133,6 +148,8 @@ Use lookup-then-act when users refer to entities by ambiguous names:
 1. `search_projects(query)` returns project IDs and distinguishing metadata.
 2. `archive_project(project_id)` acts only on an unambiguous ID.
 
+When the lookup returns multiple candidates and the agent cannot confidently pick one, prefer presenting the candidates to the user with differentiating fields (creation date, owner, last activity, location) so the user can confirm which one is meant. A "single-click" UI selection — the user sees three candidates, picks one, and the agent proceeds with the chosen ID — is far more reliable than asking the model to guess and run a destructive operation. This pattern is complementary to preview-then-execute: disambiguation resolves *which entity* the user means, preview-then-execute confirms *what action* will happen to it.
+
 Prefer stable identifiers over derived intermediate values. If the user already has a `device_id`, a downstream tool should usually accept `device_id` rather than requiring the agent to call a previous tool just to extract a serial number or location. Let the tool resolve mechanical dependencies internally when model judgment is not needed.
 
 Split tools when parameters have interdependent constraints. If a workout can be cardio or strength, a single `log_workout(type, value, unit)` tool invites invalid combinations. Separate `log_cardio_session` and `log_strength_session` tools make the schema itself encode the distinction.
@@ -179,27 +196,60 @@ Good candidates for composition:
 
 - Mechanical sequences where no decision is needed between steps.
 - Latency-heavy repeated lookups that always happen together.
-- Atomic operations where separate calls create race conditions.
+- Atomic operations where separate calls create race conditions (for example, "check availability and book" must be atomic when other users may grab the slot between two separate calls).
 
-Keep steps separate when the model must inspect intermediate results before deciding.
+Keep steps separate when the model must inspect intermediate results before deciding. Selection, judgment, and editorial choice belong outside composite tools.
 
 Original examples:
 
 - A news-curation agent can use a composite `discover_and_score_articles(topic)` tool that returns candidates plus relevance scores, while leaving `add_article_to_collection(article_id)` separate because editorial selection requires judgment.
-- A booking system might combine "check availability" and "reserve slot" into one atomic operation if separate calls risk another user taking the slot between calls.
+- A booking system should combine "check availability" and "reserve slot" into one atomic `find_and_book_appointment` operation when separate calls risk another user taking the slot between calls. Adding a `hold_slot` tool can work but introduces a new race window and an extra step.
 - A research workflow should not combine "retrieve sources" and "write final conclusion" because the model needs to inspect the sources and preserve provenance.
+
+When a downstream tool keeps requiring an upstream tool's output for a mechanical reason (for example, fetching the address of a property just to pass it to a neighborhood-info tool), redesign the downstream tool to accept the stable identifier directly and resolve the address internally. This eliminates the latency of an unnecessary lookup and the failure coupling when the upstream call fails.
+
+### Pagination
+
+External APIs often return paginated results. Auto-fetching every page is rarely the right behavior:
+
+- It causes long latency for queries that match many results.
+- It wastes tokens when the user only needs the first few items.
+- It can blow context when matches are very large.
+
+Better design: return the first page, a `total_count` (or estimate), and a cursor or continuation token. Let the agent or user request more pages only when necessary.
 
 ### Large Tool Sets and Progressive Availability
 
-Tool selection degrades when the model must choose among too many similar tools. If an agent has dozens of external connectors, API operations, or domain-specific tools, do not expose everything at once by default.
+Tool selection degrades when the model must choose among too many similar tools. Empirically, accuracy drops noticeably as the tool count grows past a handful of similar options. If an agent has dozens of external connectors, API operations, or domain-specific tools, do not expose everything at once by default.
 
 Use progressive availability:
 
 1. Start with a small set of discovery tools, such as `search_available_connectors` or `find_relevant_operations`.
 2. Return a ranked shortlist with names, descriptions, required inputs, and confidence.
-3. Add or enable only the selected matching tools for the next step, or route through an orchestrator that narrows the tool set.
+3. Dynamically add the selected matching tools to the agent's available tools so it can call them on subsequent turns. Once discovered, the relevant tools persist and the agent uses them like any other tool.
 
 This is different from a monolithic `find_and_execute` tool. Search-and-execute hides the final decision and can perform the wrong action too early. A discovery tool should narrow the choices; the agent or user should still be able to inspect the selected operation before execution when risk is meaningful.
+
+The Claude Agent SDK supports this pattern natively through tool search and dynamic tool registration. MCP servers can also notify clients when their tool list changes, allowing connected agents to refresh their view of available tools without reconnecting.
+
+### Output: requires_review and Decision Hints
+
+When tool outputs include uncertainty (for example, ML extractions with confidence scores), do not just return raw confidence and ask the model to interpret it. Calibrate thresholds against a labeled validation set and return both the data and a derived `requires_review` boolean with reasons:
+
+```json
+{
+  "fields": {
+    "vendor": {"value": "Acme Corp", "confidence": 0.94},
+    "amount": {"value": 1280.5, "confidence": 0.62}
+  },
+  "requires_review": true,
+  "review_reasons": ["amount_below_confidence_threshold"]
+}
+```
+
+Raw scores invite both over-trust and over-escalation. Calibrated thresholds produce consistent agent behavior.
+
+For confirmation flows, the tool should also return enough structured detail that the user can see what they are confirming: cost, target, schedule, irreversible effects, scope, and anything else needed to catch a mistake. A "Ready to post. Confirm?" prompt with no details is unsafe even when users always click yes.
 
 ### Safety and Confirmation
 
@@ -280,8 +330,14 @@ A cleaner internal representation might be:
 
 MCP tools have two error mechanisms:
 
-- **Protocol errors**: the request could not be processed as a protocol operation. Examples: unknown tool, malformed JSON-RPC request, invalid arguments at the protocol boundary, unsupported method.
-- **Tool execution errors**: the tool was invoked, but the underlying operation failed. Examples: upstream API returned 404 or 503, business rule violation, permission denial, rate limit.
+- **Protocol errors**: the request could not be processed as a protocol operation. Examples: unknown tool, malformed JSON-RPC request, invalid arguments at the protocol boundary (such as a missing required parameter that the schema declares mandatory), unsupported method.
+- **Tool execution errors**: the tool was invoked, but the underlying operation failed. Examples: upstream API returned 404 because the requested record does not exist, upstream API returned 503 because the service is temporarily unavailable, business rule violation, permission denial, rate limit.
+
+Concrete example. An `check_availability(user_email)` tool faces three errors:
+
+1. Caller omits `user_email` entirely, violating the tool's input schema. This is a **protocol error** (JSON-RPC error) — the call was not even structurally well-formed.
+2. The calendar API returns 404 because the user does not exist. The tool was invoked correctly, the operation simply failed. **Tool execution error** with `isError: true`.
+3. The calendar API returns 503 because the service is down. Again, the tool was invoked correctly. **Tool execution error** with `isError: true`.
 
 Do not turn ordinary business failures into protocol failures. A missing record in the backend is not a JSON-RPC protocol failure; it is a tool execution result with `isError: true`.
 
@@ -289,9 +345,25 @@ Do not turn ordinary business failures into protocol failures. A missing record 
 
 Place retry logic where the needed information lives.
 
-- Tool-level retry is right for transient backend failures where the same request should succeed.
-- Model-level retry is right when the model needs to change inputs or strategy.
+- Tool-level retry is right for transient backend failures where the same request should succeed (timeout, 503, connection reset on a read).
+- Model-level retry is right when the model needs to change inputs or strategy (validation errors, syntax errors in user-provided filters, wrong identifier).
 - Human approval is needed when retrying may duplicate a side effect or violate a policy.
+
+A common production pattern: a `search_catalog` tool has 12% failures, split between transient timeouts (~8%, succeed on retry) and syntax errors in user filters (~4%, never succeed). Returning both identically wastes turns retrying syntax errors and tells users to "try again later" for timeouts. Correct design: retry transient errors inside the tool with backoff and surface only the final success or failure; surface syntax errors immediately with parameter validation details so the model can correct them or ask the user.
+
+A `retryable: true|false` boolean alone is not as effective as actually retrying transient failures inside the tool, because it still costs a model turn and risks the agent retrying anyway.
+
+### Uncertain Side Effects
+
+Writes deserve special care. If a `send_notification`, `process_payment`, or `post_content` request times out **after** submission, the tool may not know whether the side effect occurred. Returning a generic error encourages automatic retry — and that creates duplicate notifications, double charges, or duplicate posts.
+
+The right behavior:
+
+- Mark the result as an error, but communicate uncertainty in the message: "Timeout — delivery status unknown. Message may have been sent. Avoid retry without idempotency check."
+- Do not flag it as `retry_safe: true`.
+- Encourage the agent to verify with a separate status lookup, or to confirm with the user before acting.
+
+This is the inverse of read-side timeouts where retrying is usually safe.
 
 ### Common Pitfalls
 
@@ -350,7 +422,15 @@ Use instructions and examples that distinguish extraction from inference:
 - "Do not infer missing values from typical examples."
 - "Preserve informal measurements verbatim when no precise value is given."
 
-Few-shot examples are especially effective when the model is inconsistent across varied document structures. Show complete input-output pairs for edge cases: missing data, ambiguous sentiment, informal units, compound skills, multiple values, amendments, and values buried in nonstandard sections.
+Schema design also affects fabrication. If a field is required but the source rarely contains the information, the model is structurally pressured to invent values. Make these fields optional or nullable.
+
+A common alternative — running a second LLM call to "verify" extracted values against the source — is generally inferior to fixing the schema. Verification calls add cost and latency, can themselves hallucinate or rationalize the original answer, and do not address the root cause: the model produced a value because the schema demanded one. Allowing `null` (or `unclear`, or `not_stated`) lets the first call signal absence directly, which is both cheaper and more honest. Use a verification pass only as a sampling-based audit on already-good extractions, not as a fix for fabrication caused by overly strict schemas.
+
+Allow `null` rather than empty arrays when the distinction matters semantically. An empty `pros` array often reads as "the reviewer mentioned no pros," which is a real claim. `null` reads as "the document did not address pros," which is closer to the truth for very short reviews. Similarly, an enum like `["positive", "negative", "mixed"]` should grow an `unclear` value when sarcasm or ambiguity is common, so the model has a correct option instead of being forced to pick.
+
+Few-shot examples are especially effective when the model is inconsistent across varied document structures. Show complete input-output pairs for edge cases: missing data, ambiguous sentiment, informal units, compound skills, multiple values, amendments, and values buried in nonstandard sections. They are also more effective than verbose written rules at teaching subtle distinctions: when standardized formats matter (for example, "cotton blend" vs "Cotton/Polyester mix"), 2–3 input/output examples teach the format more reliably than narrative instructions.
+
+A specific failure pattern: a strict enum without escape hatch fails when new categories keep appearing. Add an `other` enum value with a paired `*_detail` string field for the source's actual wording. This handles long-tail categories without rewriting the schema each time a new category appears.
 
 ### Source Grounding and Provenance
 
@@ -385,9 +465,9 @@ JSON Schema, structured outputs, strict tool use, and Pydantic catch type, prese
 - Dates fall within allowed ranges.
 - IDs match known formats or known records.
 - Required citations exist in the source.
-- Fields are not copied into the wrong category.
+- Fields are not copied into the wrong category (a duration is not an ingredient quantity, a competitor's specs are not the product's specs).
 
-When validation fails, do not blindly retry the same request. Send a correction request that includes the source document, the previous extraction, and the exact validation errors. This is much more effective than asking the model to "try again."
+When validation fails, do not blindly retry the same request. Send a correction request that includes the source document, the previous extraction, and the exact validation errors. This is much more effective than asking the model to "try again" — and far more effective than setting `temperature: 0`, which only removes variability without addressing the underlying mismatch.
 
 Example correction prompt structure:
 
@@ -401,7 +481,29 @@ Validation errors:
 Return a corrected call to extract_invoice. Do not change fields unless needed to fix the errors.
 ```
 
-Some failures cannot be fixed by retrying. If the needed information is in an external document that was not provided, additional retries will not invent reliable evidence. Retrieve the missing source or route to human review.
+For fields prone to internal inconsistency (such as line items vs grand total on invoices), add explicit reconciliation fields to your schema:
+
+```json
+{
+  "line_items": [...],
+  "calculated_total": 1280.5,
+  "stated_total": 1295.0,
+  "totals_match": false
+}
+```
+
+Then flag mismatches automatically. This catches both OCR errors and extraction mistakes without forcing the model to reconcile values it cannot verify.
+
+#### When Retries Don't Help
+
+Some failures cannot be fixed by retrying with the same input:
+
+- The information is in an external document that was not provided to the model. Retries will only produce hallucinated values.
+- The schema requires a different format than the source provides (for example, the schema requires a flat array of strings but the source organizes the data as a nested object). The model can usually fix this on retry with feedback.
+- A locale-formatted number ("1,234") needs to become an integer (1234). Easily fixed on retry.
+- A date is given as ISO 8601 datetime but the schema requires only the date portion. Easily fixed on retry.
+
+The first case is the only one where additional retries are unproductive. Retrieve the missing source or route to human review instead.
 
 ### Long and Scattered Documents
 
@@ -412,6 +514,8 @@ Long documents can fit in the context window and still be hard to extract from w
 3. Preserve source locations so the extraction can be audited against the original.
 
 Use chunking when documents exceed context limits or when independent sections can be processed separately. Use a pre-extraction summarization or mapping step when the document fits but the key facts are distributed across a meandering transcript, long contract, or multi-section report. Chunking alone can lose cross-section relationships; summarization alone can lose exact values. Choose based on the failure mode.
+
+For long-but-in-context inputs (a sprawling meeting transcript, a long support thread, an unstructured incident report) where the source fits but key facts are buried among unrelated content, a model-driven pre-extraction pass usually outperforms both raw extraction with more few-shot examples and mechanical chunking. Add a first call that asks the model to surface the relevant sections — decisions, action items, named entities, dollar amounts, dates — into a structured intermediate. Then run extraction against that intermediate. The intermediate keeps the model focused on the parts that matter and substantially reduces the rate at which scattered details are missed or conflated. Few-shot examples help when extraction patterns are unusual; they do not by themselves help the model find a needle in a haystack. Chunking spreads the haystack across requests but loses cross-chunk relationships. Pre-extraction summarization preserves both.
 
 ### Confidence and Human Review
 
@@ -438,7 +542,11 @@ Route human review based on:
 - Failed semantic validation.
 - New or historically error-prone document types.
 
-Even high-confidence automation needs ongoing sampling. Use stratified random review of high-confidence outputs to detect hidden error patterns and measure whether improvements actually reduce error rates.
+#### Validating Automation Plans
+
+Before automating high-confidence extractions, do not just verify aggregate accuracy. A pipeline that is 97% accurate overall can still be 80% accurate on a specific document type or field. Break down accuracy by segment (document type, field, source) before raising the automation threshold. Lowering the threshold or comparing thresholds before that segment-level analysis is premature.
+
+Even after automation begins, sample high-confidence outputs continuously. Use stratified random review of a fixed percentage to detect hidden error patterns and measure whether improvements actually reduce error rates. Lowering the threshold or relying only on downstream complaints misses systematic errors that look reasonable to humans not reading the source.
 
 ### Feedback Loops
 
@@ -450,13 +558,19 @@ Human corrections should feed prompt and schema improvements. Look for recurring
 - False positives in code review findings.
 - Repeated validation failures by field.
 
-Add few-shot examples or schema changes that target the pattern. Do not jump immediately to fine-tuning or heavy infrastructure when a focused prompt/schema improvement addresses the failure.
+When you observe a clear recurring failure mode (for example, "informal measurements like 'a handful' or 'a splash' get either invented or omitted in 23% of corrections"), the highest-leverage change is usually adding a few-shot example demonstrating the correct handling — extracting the informal phrase verbatim. Fine-tuning, regex post-processing, or new schema fields are heavier interventions that can be considered only if focused prompt/schema improvements do not move the metric.
+
+For dismissed code-review findings, add fields like `detected_pattern`, `rule_id`, or `evidence` so analysts can see *what kind of code construct* triggered each finding. Aggregate dismiss rates by pattern, then update the prompt criteria for the over-reporting patterns. Without that field, you can only see "35% are dismissed," not which constructs to suppress.
 
 ### Batch Extraction
 
 For high-volume asynchronous extraction, the Message Batches API can reduce cost but adds latency. Use it when the workflow tolerates delayed results. Use real-time Messages API for urgent documents, interactive user flows, or SLA-sensitive alerts.
 
 Batch requests have `custom_id` values. Results may not arrive in the same order as requests, so always join results by `custom_id`. If a small percentage fail due to context length or validation errors, resubmit only the failed documents after fixing the cause, such as chunking long inputs or improving the prompt.
+
+For mixed urgency, route per-document, not per-batch. Standard documents go to the Batch API for cost savings; urgent ones go to the real-time Messages API to meet tight latency SLAs. Trying to batch everything and then expedite urgent documents inside the batch defeats the purpose — batch processing latency is the main reason urgent items cannot use it.
+
+For one-shot bulk extraction with a deadline (for example, 50,000 documents under a two-week deadline where a meaningful percentage will need prompt iteration), submit everything to the Batch API for the bulk discount, then submit the failures in successive batches with refined prompts. Sequencing 10 sequential batches of 5,000 each costs more in calendar time and does not buy meaningful learning. Sampling first via real-time API can help characterize failure modes, but it is a small slice of the overall workload, not the main strategy.
 
 ### Common Pitfalls
 
@@ -490,7 +604,9 @@ The right context strategy depends on what must be preserved:
 
 A sliding window keeps the most recent messages and drops older ones. It is simple and cheap. It works when older context is rarely needed. It fails when users refer back to earlier decisions, preferences, or exact data.
 
-Use sliding windows for short, transactional flows where old context has little value.
+Use sliding windows when production logs show older messages are rarely referenced — for example, when 94% of user messages only reference the previous 3-5 exchanges and the remaining 6% ask about information users could easily re-state. In that traffic profile, a sliding window keeping the last 8-10 turns plus the system prompt restores response speed and quality. When users do reach back, the assistant can ask them to re-state the relevant information.
+
+Sliding windows are also the right tool for **accumulated RAG results**. If RAG retrievals from many earlier queries pile up alongside the conversation, they crowd out turn-by-turn coherence. Apply a sliding window specifically to RAG results (keep the last 2-3 retrievals) while preserving conversation history under its own policy. Aggressive deduplication or summarizing all RAG into one digest is more complicated and rarely better.
 
 ### Progressive Summarization
 
@@ -511,11 +627,26 @@ Important facts:
 - Existing system processes about 40K records per day.
 ```
 
-Bad summaries are vague narratives. They lose the exact facts that users later ask about.
+Bad summaries are vague narratives. They lose the exact facts that users later ask about. When information matters specifically — themes of past discussions, narrative continuity across many sessions, the group's prior conclusions — summaries should explicitly extract decisions, conclusions, and recurring themes rather than producing prose that "describes the conversation."
+
+Use a hybrid approach for ongoing conversations: replace older turns with structured summaries, keep the most recent turns verbatim. Increasing the sliding window from 25 to 50 turns is rarely the right answer; it just defers the limit. Hybrid summarization preserves long-term continuity at much lower token cost.
+
+### Persistent Reference Sections
+
+Some content must remain exact and stable across the whole conversation, even when the surrounding discussion is ephemeral. Examples:
+
+- Story bibles: character backgrounds, plot structure, world rules.
+- User-defined terms: "room temperature butter means 68°F in this kitchen."
+- Critical safety info: allergies, medication interactions.
+- Active scaling parameters: "scale all recipes to 8 servings."
+
+Separate these into a retained reference section at the start of context. Apply trimming or summarization only to the surrounding discussion. Mixing the two and applying a single summarization pass risks losing the exact details the user expects to remain consistent.
+
+For dinner-party-style sessions where the conversation includes both critical structured data (allergies, serving counts, definitions) and general back-and-forth (timing, presentation), the right strategy combines several techniques: extract critical data into a compact reference section, summarize general discussion, and retain recent exchanges verbatim. A pure sliding window loses the allergies; a single summary blurs the exact serving count.
 
 ### Structured State
 
-When users revise preferences, maintain a canonical state object that represents current truth:
+When users revise preferences mid-conversation, maintain a canonical state object that represents current truth:
 
 ```json
 {
@@ -528,9 +659,16 @@ When users revise preferences, maintain a canonical state object that represents
 }
 ```
 
-This is more reliable than expecting the model to infer the current preference from a long conversation containing old and new values.
+Update the object whenever the user changes a preference. Include it in each request. This is more reliable than:
 
-When preferences conflict, do not silently pick one if the decision matters. Surface the conflict and ask the user to resolve it before making a recommendation.
+- Expecting the model to infer current truth from a long conversation containing old and new values.
+- Adding system prompt instructions like "always prioritize the most recently stated preferences." The model usually does, but not reliably enough.
+- Pruning old turns. Pruning may remove important context for other reasons.
+- Few-shot examples of "the assistant correctly applies preference changes." These help framing but do not give the model a single source of truth.
+
+When preferences conflict, do not silently pick one if the decision matters. A user who says "I have very low risk tolerance" and later says "I want to maximize my returns like my friends did with crypto" has stated incompatible goals. The right behavior is to surface the contradiction and ask which priority should govern. A balanced compromise risks recommending something that fits neither stated preference.
+
+The same principle applies to multi-issue customer sessions. If a customer raises three separate issues across 45 turns (a refund, a subscription question, a payment update), structured state can track each issue's current status — order ID, amounts, resolution state — independently of the linear conversation, so the agent can reliably answer "what happened with my refund?" later in the session.
 
 ### Retrieval and Fact Stores
 
@@ -542,11 +680,13 @@ For research assistants, combine:
 - Source retrieval for exact claims.
 - Structured fact tables for recurring numerical lookups.
 
+A common pattern: a research assistant summarizes paper discussions after 8 turns to control context, but then users ask follow-up questions requiring precise numerical details (sample sizes, p-values, inclusion criteria) that the summaries blurred. Two design responses both work, but the most direct fix is to **re-inject relevant source sections on demand** when a user's question signals they need precision. A separate structured fact store of every numerical detail is heavier and may not match the variety of follow-ups; "higher fidelity summaries" that preserve all numbers tend to balloon back into the original document. On-demand retrieval scales better.
+
 ### Tool Result Compression
 
 Verbose tool results can crowd out useful conversation. After a tool result has been processed, extract the fields that matter and drop the rest.
 
-Example: after retrieving order details, keep `order_id`, `purchase_date`, `items`, `return_window`, `payment_status`, and `resolution_state`; discard internal backend fields, unrelated shipping events, and duplicated metadata.
+Example: after retrieving order details, keep `order_id`, `purchase_date`, `items`, `return_window`, `payment_status`, and `resolution_state`; discard internal backend fields, unrelated shipping events, and duplicated metadata. If a `lookup_order` tool returns 40+ fields and the agent has called it multiple times for an investigation into return requests, those tool outputs can come to dominate context. Compressing each prior order response to its return-relevant fields, then making additional lookups, is more reliable than continuing to accumulate raw responses, summarizing them all into prose, or moving them to a vector database for retrieval.
 
 ### Returning Users and Stale Data
 
@@ -563,6 +703,8 @@ Good returning-session summary:
   "fresh_lookup_required": true
 }
 ```
+
+Why not just resume the old session and add an instruction telling the agent to "prefer the most recent tool results"? Because the agent often references old tool results regardless of instructions, especially when the older results are more detailed than the newer ones. Filtering tool_result messages from the resumed history risks confusing the model about why earlier turns reference data it cannot see. Configuring the agent to re-call all previous tools at session start wastes calls on tools whose results may not be relevant to the new question. Starting fresh with a structured summary plus targeted fresh lookups is the most reliable pattern.
 
 ### External Updates During a Conversation
 
@@ -591,6 +733,10 @@ If you change a system prompt for users with ongoing multi-session conversations
 
 The system prompt defines role, tone, constraints, and priorities. It should be included in every request. It is not a one-time initialization message.
 
+A common confusion is "the system prompt is sent only on the first turn and Claude remembers it." That model is wrong. Claude has no memory between API calls. The system prompt and the full message history must be sent on every request. If your application omits the system prompt on later turns, behavior will diverge from the configured persona immediately, not gradually. Likewise, prior assistant and user messages must be sent in the `messages` array, even when their content seems redundant — the model has no other way to see them.
+
+A separate effect is real, however: even when the system prompt is included on every call, **attention to it weakens as the conversation grows.** This is not because the prompt is "dropped." It is because the model's recent assistant outputs and the latest user turns increasingly compete for attention with the system prompt. After many turns, behavior can drift even though the system prompt is unchanged and the context window is not full. The fix is structural — reinforce key instructions at natural breakpoints, version the prompt for long-lived sessions, and move hard requirements into code or tool implementations.
+
 Good system prompts use clear sections:
 
 ```xml
@@ -611,7 +757,9 @@ If the user asks for personalized investment, legal, or medical decisions, expla
 </examples>
 ```
 
-XML-style tags are not magic, but they improve salience and organization.
+XML-style tags are not magic, but they improve salience and organization. They are particularly helpful when the same word means different things in different contexts (a `<role>` block clearly separates persona from a `<style>` block, even if both reference "tone"), and when you want examples or constraints to be referenceable later in the conversation ("apply the rule from `<safety>`").
+
+When external systems update state mid-session — for example, a webhook reports that an order has shipped, or a billing event flips a customer's plan — the right place to surface that change is the system prompt for the next call, not buried inside a tool result. The system prompt is the natural home for "what is currently true about this user, account, or environment." Tool results are appropriate when the agent itself called for the information; system-prompt updates are appropriate when state changed without the agent asking.
 
 ### Principles vs Conditionals
 
@@ -628,6 +776,8 @@ Use explicit conditionals for safety-critical triggers:
 
 If a rule must hold 100% of the time, move it out of the prompt and into code.
 
+A common over-correction is to translate every nuanced behavior into an explicit conditional. This rarely improves behavior and often hurts it. Consider an assistant that should adapt explanation depth to demonstrated user expertise. A general principle ("Adapt depth to the user's demonstrated proficiency, increasing detail when their questions show domain familiarity") lets the model integrate dozens of implicit signals — vocabulary, framing, follow-up specificity, the level of error in their guesses. A long list of conditionals ("If user mentions X, assume novice; if user uses term Y, assume intermediate…") forces the model into a shallow keyword match and tends to misclassify users who phrase things atypically. Use principles for judgment; reserve conditionals for safety triggers and policy bright lines.
+
 ### Few-Shot Examples
 
 Examples often outperform long prose instructions. Use examples when you need the model to learn distinctions:
@@ -640,6 +790,8 @@ Examples often outperform long prose instructions. Use examples when you need th
 
 Keep examples realistic and compact. Show the exact behavior you want.
 
+When a system prompt has grown into long bulleted rule lists, behavior often drifts because the model cannot keep all rules salient at once. Replacing chunks of those rules with two or three contrasting examples typically restores adherence: rather than telling the model in seven sentences how to summarize a beginner's question vs an expert's question, show it both. Examples are denser than prose for behavior the model needs to learn rather than recite.
+
 ### Prompt Dilution
 
 System prompt adherence can weaken as conversation grows, even before the context window is full. The assistant's previous responses become a behavioral pattern. Mitigations:
@@ -651,6 +803,11 @@ System prompt adherence can weaken as conversation grows, even before the contex
 - Validate or enforce important rules outside the model.
 
 For long-running workflows, reinforcement can be inserted as application state or user-role reminders at natural breakpoints. Avoid cluttering every turn with giant repeated instructions.
+
+Concretely, two reinforcement patterns work well:
+
+- **User-role reminders at natural breakpoints.** When a session crosses a phase change — finishing one task and starting another, returning after a long idle period, switching topics — append a brief user-role message that re-states the current operating constraints. This is more effective than re-sending the entire system prompt because it integrates with the conversational flow the model is already attending to.
+- **System prompt versioning across long sessions.** For multi-day or multi-session conversations, allow the application to update the system prompt between turns to reflect what is now true (the user's current plan, latest decisions, completed steps). Treat the system prompt as living configuration, not a static initialization string. The full conversation messages still go in `messages`; the system prompt carries "what currently holds" rather than "what was true on day one."
 
 ### Clarifying Questions and Assumptions
 
@@ -675,7 +832,11 @@ Good pattern:
 I'll assume you want the report edited for clarity rather than rebuilt from scratch. I'll focus on structure and wording first, and you can redirect me if you meant formatting or data analysis.
 ```
 
-When user preferences conflict, do not average them into a vague compromise. Name the tension and ask which priority should govern.
+For genuinely ambiguous requests, prefer **one focused clarifying question** over a list of three or four. Multiple simultaneous questions feel like an interrogation and frequently cause users to answer only the first. Pick the disambiguation that most changes your next action.
+
+Front-loading many clarifying questions before any action is also typically wrong. The cost of a small redirected effort is usually lower than the friction of long preflight Q&A. The exception is when the action is irreversible, costly, or touches a regulated domain — there, ask first and proceed only after explicit confirmation.
+
+When user preferences conflict, do not average them into a vague compromise. Name the tension and ask which priority should govern. For example, if a user wants both "the cheapest possible flight" and "arriving by 9 AM Friday with no layovers," surface the contradiction explicitly: a cheap nonstop arriving by Friday morning may not exist on this route, so which constraint should bend? Hidden compromises produce results that satisfy neither stated goal and usually require rework.
 
 ### Response Format Control
 
@@ -685,6 +846,8 @@ If responses become repetitive, do not only add "never say X" lists. Better opti
 - A concise style guide.
 - Partial assistant prefill for specific API calls.
 - Post-processing for purely cosmetic cleanup when safe.
+
+Partial assistant prefill is particularly effective for repetitive openers. If every reply starts with "Great question!" or "I'd be happy to help," prefilling a more neutral first sentence (or a constrained format like a checklist marker) skips the boilerplate without expanding the system prompt. Keep the prefill short — one phrase, not a paragraph — and avoid prefilling content the model needs to reason about.
 
 For strict machine-readable output, prefer structured outputs or tool use over text formatting instructions.
 
@@ -717,6 +880,14 @@ Use resources for passive context: database schemas, documentation trees, issue 
 
 Use prompts for reusable workflows: review checklists, report templates, investigation playbooks.
 
+A common design question is "should this be a resource, a tool, or a separate aggregator?" The default decision rule:
+
+- If the content is reference material the agent might want to consult before acting (database schemas, API specs, file catalogs, project guidelines, configuration), expose it as a **resource**. The agent reads it like context; no tool call is needed beyond the resource fetch.
+- If the content is dynamic and requires computation or external lookup at the moment of use (the current state of an order, the result of a query against live data), expose it as a **tool**.
+- If the agent is overwhelmed by similar tools across many servers, the right fix is improving descriptions and using progressive availability — not consolidating everything behind a single "natural language entry tool" that re-routes to the underlying tools. That kind of aggregator hides the real tool surface from the model and tends to produce worse selection, not better.
+
+Resources and tools are complements, not alternatives. A well-designed MCP server typically exposes both: resources for "what is true and stable about this system" and tools for "what actions can be taken on it." Replacing resources with tools forces the agent to make a tool call to learn anything; replacing tools with resources prevents the agent from acting at all.
+
 ### Why MCP
 
 MCP is most valuable when the integration should be reusable across multiple clients or applications. If five AI tools need the same internal ticketing data, expose it once through an MCP server. If only one agent needs a deeply application-specific workflow, a custom tool inside that application may be simpler.
@@ -738,28 +909,45 @@ Do not first remove all competing tools. The agent often needs generic tools too
 
 ### Tool Annotations and Trust
 
-MCP tool annotations such as read-only or destructive hints are metadata supplied by the server. They are not a security boundary. Use them as UI or planning hints, not as proof. Confirmation and permission decisions should depend on server trust, tool identity, user policy, and operation risk.
+MCP tool annotations are metadata that servers may include alongside their tool definitions. The standard hints include `readOnlyHint` (the tool does not modify state), `destructiveHint` (the tool may make irreversible changes), `idempotentHint` (calling the tool twice with the same input has the same effect as calling it once), and `openWorldHint` (the tool reaches external systems whose behavior the host cannot fully predict). These hints help the host build sensible UI affordances — for example, auto-allowing read-only tools, warning on destructive ones, suppressing repeat-confirmation on idempotent ones.
+
+**Annotations are not a security boundary.** A malicious or buggy server can advertise `readOnlyHint: true` for a tool that deletes data. The host must treat annotations as untrusted hints and base actual permission and confirmation decisions on the server's trust level, the user's policy, the tool's identity, and the operation's real risk. A typical correct policy: use annotations to choose which prompt to show, but never use them to skip a security check that policy requires.
 
 ### MCP Error Handling
 
-Tools use two error mechanisms:
+MCP distinguishes two error tiers, and using the wrong one is a common bug:
 
-- JSON-RPC protocol errors for protocol-level failures.
-- Tool results with `isError: true` for execution failures.
+- **JSON-RPC protocol errors** are returned when the request itself is invalid or the tool cannot be invoked at all: missing required parameters, unknown method, malformed JSON, parameter type mismatches. The client treats these as protocol-level failures, not as something to relay to the model as if the tool had run.
+- **Tool result with `isError: true`** is returned when the tool ran but failed semantically: a remote 404, a 503 from an upstream service, a permission denial, a validation rejection from the underlying system. The model sees these as tool results and can adapt — retry, choose a different tool, or surface to the user.
 
-For resources, servers should validate URIs and return appropriate JSON-RPC errors for not found or internal failures.
+A useful rule: if the failure happened before the tool's business logic could execute, return a JSON-RPC protocol error. If the tool reached its target system and that system or the operation itself failed, return a tool result with `isError: true` and a useful message. Putting a missing-parameter failure in `isError` confuses the agent into retrying with the same bad call; putting a remote 503 into a JSON-RPC error prevents the agent from trying again later.
+
+For resources, servers should validate URIs and return appropriate JSON-RPC errors for not found or internal failures. For tools that wrap inherently flaky network calls, lean toward `isError: true` with a clear message so the agent can decide whether to retry, switch tools, or escalate.
+
+### Tool Search and Progressive Availability
+
+Hosts can expose dozens of MCP servers, and presenting all their tools at once would consume a large fraction of the context window before any work begins. Two coordinating mechanisms exist:
+
+- **Tool search / progressive availability.** The host shows the agent a small surface initially and lets it pull additional tool definitions on demand based on the current task. The agent only spends tokens on tools it is about to use.
+- **`list_changed` notifications.** A server can notify clients that its tool set has changed (a server connected, a feature flag flipped, a permission changed). The client refreshes its tool list and the agent can pick up the new capability without a session restart.
+
+When designing an MCP server intended for a host with progressive availability, pay extra attention to descriptions and names: the agent may discover the tool through search, so the description must read well in isolation, not only when listed alongside its siblings.
 
 ### MCP in Claude Code
 
-Claude Code can configure MCP servers at several scopes:
+Claude Code can configure MCP servers at several scopes. The scope determines where the configuration lives, who can see it, and which copy wins when names collide:
 
-- Project scope uses `.mcp.json` in the repository root and is meant for shared team configuration.
-- Local and user scopes are stored in `~/.claude.json`, with local tied to the current project entry and user available across projects.
-- If the same server name exists at multiple scopes, higher-precedence definitions win.
+| Scope | Storage | Visibility | Typical Use |
+|---|---|---|---|
+| Project | `.mcp.json` at the repository root, checked into version control | Everyone who clones the repo | Tools the whole team needs to do the project's work — internal documentation servers, project-specific test runners, build orchestration |
+| Local | An entry inside `~/.claude.json` keyed to the current project path | Only the current user, only when working in that project | Sensitive credentials for personal accounts, experimental servers under evaluation, project-specific tooling not yet ready to share |
+| User | A separate entry in `~/.claude.json` not tied to a project | Only the current user, in any project they work on | Personal productivity tools — calendar, email, notes, clipboard — that the user wants available everywhere |
 
-Use project scope for shared tools required by the repo. Use user scope for personal tools used across many projects. Use local scope for sensitive or experimental project-specific setup.
+When the same server name exists at multiple scopes, the higher-precedence configuration wins. A common convention is project > local > user, so a team-shared `.mcp.json` definition overrides a user's experimental copy of the same server name. Use project scope deliberately because it is shared. Avoid putting personal credentials in project scope — those belong in local or user scope, where they remain on the developer's machine.
 
-MCP prompts can appear as slash commands. MCP output can be large; control output size so it does not crowd out the conversation.
+A nuance worth remembering for the exam: local and user scopes both live inside `~/.claude.json`, but at different keys. They are not "the same scope with different names" — local entries are scoped to a project path, user entries are global to the user. Selecting the wrong scope for a personal tool can leak credentials into a shared repo or, conversely, hide a tool the developer expected to see in every project.
+
+MCP prompts surface as slash commands in Claude Code. The slash-command name typically follows a `mcp__<server>__<prompt>` pattern so the user can disambiguate prompts coming from different servers. MCP output can be large; tool authors should control output size and offer pagination or summarization affordances so a single tool call does not crowd out the rest of the conversation.
 
 ### Common Pitfalls
 
@@ -796,9 +984,31 @@ Examples:
 - Use dynamic decomposition for debugging an intermittent backend failure.
 - Use parallel subagents when several independent documents or repositories can be analyzed separately.
 
+The decision is not "which pattern is best" but "which pattern matches the shape of this work." Prompt chaining adds reliability by constraining the model to a known sequence; pay that cost when the steps really are fixed and skip it when the work is exploratory. Dynamic decomposition is appropriate when the next step genuinely depends on what the model just learned — for example, an investigation where the first finding determines whether to gather logs, query a database, or interview a stakeholder. Hard-coding investigation steps tends to either miss the actual problem or waste effort gathering irrelevant data.
+
+A useful contrast: a billing-dispute resolution workflow that always runs "verify identity → fetch invoice → check policy → propose adjustment" is a good fit for prompt chaining. A security incident triage that runs "examine alert → decide whether to pull logs, query a SIEM, page on-call, or all three" is a good fit for dynamic decomposition. Forcing chaining onto the second wastes coordinator effort and produces shallow analyses; forcing decomposition onto the first invites unnecessary tool calls and inconsistent outputs.
+
+Dynamic decomposition specifically suits investigations where the next move only becomes clear after the current finding. Debugging an intermittent backend failure, root-causing a customer's unusual error report, or narrowing down a flaky test all share that shape: the model cannot write a fixed plan upfront because what to look at next depends on what the previous step revealed. A pre-written debugging checklist often misses the actual cause and runs every step regardless. With dynamic decomposition, the coordinator commits to a goal (find the cause), inspects what it has, and decides the next action — gather logs, examine config, reproduce locally, escalate — based on the current evidence. The trade-off is unpredictability: dynamic plans are harder to budget for than fixed chains, so set explicit termination criteria and step caps.
+
+### When the Coordinator Should Not Delegate
+
+Subagents add overhead. Each delegation incurs a tool call, a fresh context, a separate model invocation, and a result-passing step. When the coordinator already has the relevant context and the work is small, calling a subagent is slower and more expensive than just doing the work in the coordinator's turn. Save delegation for cases where the task would flood the coordinator's context (a long document analysis), genuinely needs a different prompt or tool set (a specialist persona), or can run in parallel with other work. For "summarize these three sentences I just retrieved," let the coordinator answer.
+
+### Parallel Subagents Across a Partition
+
+When a single large task can be cut into independent pieces — auditing 50 repositories, analyzing 30 documents, scanning 100 dependencies — the right pattern is partition-then-parallel: the coordinator divides the input set into N roughly equal chunks, spawns N subagents (one per chunk), and synthesizes their structured outputs. Each subagent works only on its slice of the partition, returning a uniform result shape the coordinator can merge.
+
+This pattern wins when the work is uniform enough that the coordinator can describe each subagent's job from a template and the units do not need to consult one another. Total elapsed time becomes max(subagent_durations), so balance partitions by expected effort rather than by raw count. If a few partitions are far heavier than the rest, the slowest one dictates total time and the parallelism is wasted.
+
+Avoid this pattern when units depend on each other's findings (a finding from repo A must inform the analysis of repo B), when the partition would split a logical unit (chopping a document mid-section), or when sequential streaming output to the user matters more than total throughput.
+
 ### Multi-Agent Context Passing
 
-Subagents do not automatically share full conversation state. A coordinator must pass the context each subagent needs. Usually that means a concise task, relevant findings, source references, constraints, and expected output shape.
+Subagents do not automatically share the parent's conversation state. When the parent agent invokes a subagent (in the Claude Agent SDK, this typically happens through a Task or Agent tool), the subagent starts a fresh conversation. It receives only what the parent explicitly passes — usually the prompt the parent constructed, plus the subagent's own definition (system prompt, allowed tools, model selection). It does not see the parent's prior user turns, prior assistant turns, prior tool results, or memory of earlier subagent runs.
+
+Two consequences follow. First, every piece of context the subagent needs has to be in the prompt the parent constructs: the goal, the relevant findings, the constraints, the expected output shape, the source references. Second, a "resume the previous research subagent" pattern doesn't exist by default — calling the Agent tool again starts a brand-new agent. If you need continuity, the parent must persist an identifier and pass it through, or include the prior summary in the new prompt.
+
+A coordinator must therefore pass the context each subagent needs. Usually that means a concise task, relevant findings, source references, constraints, and expected output shape.
 
 Poor handoff:
 
@@ -825,11 +1035,15 @@ Examples:
 - A synthesis subagent may need no external search tools if it should only work from supplied findings.
 - A report generator needs formatting and citation inputs, not raw broad search.
 
+In the Claude Agent SDK, the mechanism for delegating to a subagent is itself a tool — typically named `Task` or `Agent`. For the parent to spawn a subagent, this tool must appear in the parent's `allowedTools` list. Forgetting to allow the Task/Agent tool is a common reason an "orchestrator" cannot delegate at all: the subagent definitions exist, but the parent has no callable interface to launch them. The subagent's own `allowedTools` is configured separately in the AgentDefinition and constrains what the subagent can do once spawned.
+
 ### Parallel Execution
 
 If tasks are independent, the coordinator should start them concurrently rather than serially. In tool-calling systems, that often means emitting multiple tool calls in one assistant turn when the platform supports parallel tool calls. In an external orchestrator, it may mean launching concurrent SDK calls and aggregating results.
 
 Do not parallelize when the second task needs the first task's output. For example, document analysis cannot inspect sources until sources are identified, but analyzing independent source documents can run in parallel after retrieval.
+
+A common phasing pattern is: serial decomposition (one model call to plan and identify the independent units of work) followed by parallel execution (each unit runs as its own subagent or tool call concurrently) followed by serial synthesis (one final call assembles the results). The parallel phase wins the most latency back when subtasks involve I/O — fetches, searches, document analyses — because elapsed time becomes max(subtask_durations) instead of sum(subtask_durations). For CPU-bound or token-bound work the speedup is smaller. When subtasks have differing latency, the slowest determines total time, so balance work across subagents rather than letting one of them carry an outsized share.
 
 ### State Persistence
 
@@ -933,6 +1147,14 @@ Use tool-level enforcement, middleware, permissions, or hooks. Prompt instructio
 
 The safest design often puts the rule inside the tool itself. For example, `process_reimbursement` can internally disburse amounts below a threshold and create a pending manager approval above it. This prevents the model from bypassing the rule by choosing the wrong tool or setting an approval flag incorrectly.
 
+A few patterns work well in combination, and the exam tends to test the difference:
+
+- **Threshold enforcement inside the tool.** The tool reads the threshold from a server-controlled source — feature flag, policy service, account record — not from a parameter the model passes. The model can call `issue_credit(amount=…)` but cannot raise the cap by setting `override=true`, because no such parameter exists on the public interface. If a model call exceeds the limit, the tool returns a structured "requires_approval" result, not a silent failure.
+- **Preview-then-execute with single-use tokens.** For high-impact actions (closing accounts, charging cards, sending external notifications), split the operation into two tools: a preview tool that returns a redacted summary plus a one-time execution token, and an execute tool that consumes that token. The model presents the preview to the user verbatim, the user confirms, and only then does the execute tool fire. The token is short-lived and bound to the previewed payload; the model cannot construct a token from scratch or reuse one with different parameters.
+- **Server-side authorization checks before any state change.** Even when the model is well-behaved, the tool should re-verify the caller's authority on every invocation. "The model already checked policy" is not a defense. Tools live inside the trust boundary; they must validate.
+
+Avoid letting prompt instructions ("never refund above $50 without manager approval") be the only line of defense. Adversarial users, prompt-injection in retrieved content, or a malformed tool description can all push the model past prose rules. Defense-in-depth means: prompt rules to bias the agent, tool implementations to enforce, and audit logs to detect.
+
 ### Graceful Degradation
 
 If a tool fails mid-workflow, the agent should still deliver useful progress:
@@ -943,6 +1165,8 @@ If a tool fails mid-workflow, the agent should still deliver useful progress:
 - Offer next steps such as retry, escalation, or notification.
 
 Do not claim a side effect will happen if the system has not completed it. Do not immediately escalate when the agent can still answer part of the user's problem.
+
+For partial completion, prefer "here is what is done, here is what is pending, here is how we can finish" over either a flat success message or a generic "we hit an error." Users tolerate visible incompleteness; they do not tolerate later discovering that an action they thought was completed had silently rolled back. When the same tool keeps failing on the same input, treat it as a signal to switch strategies — try a different tool, ask a clarifying question, or escalate — rather than burning more retries on the same call.
 
 ### Common Pitfalls
 
@@ -1003,23 +1227,35 @@ Plan mode lets Claude read and propose a plan before touching disk. In Claude Co
 
 For urgent production bugs, start by gathering evidence: stack trace, relevant code, logs, and reproduction path. If the fix is obvious and narrow, implement directly. If the root cause reveals broad architectural impact, switch to planning before a larger change.
 
+### Plan Mode vs Extended Thinking
+
+These are different mechanisms and should not be conflated. Plan mode is a Claude Code session mode in which the assistant explores read-only and produces a plan before any edits, then waits for user approval. It is about *workflow control* — gating the transition from "thinking" to "doing" so the human can review the strategy.
+
+Extended thinking is a model capability where Claude is given more internal reasoning budget before producing its output. It is about *reasoning quality* on hard problems — multi-step proofs, intricate code analysis, ambiguous requirement reconciliation — and does not by itself change whether the model takes actions or asks for approval.
+
+Both can be used together: plan mode for review-gate the workflow, extended thinking for harder reasoning during planning or implementation. But they solve different problems. If the issue is that the agent jumps straight to edits without surfacing trade-offs, use plan mode. If the issue is that the agent gives shallow analyses on a complex problem, use extended thinking.
+
 ### Sessions
 
-Key CLI behaviors:
+Claude Code organizes work into sessions — each session is a stored conversation transcript that can be resumed later. Several CLI flags control session behavior, and they are easy to confuse:
 
-- `--continue` resumes the most recent conversation in the current directory.
-- `--resume` / `-r` resumes a specific session by ID or name, or opens a picker.
-- `--session-id` uses a specific UUID for the conversation.
-- `--fork-session` creates a new session branched from an existing conversation history, useful for exploring alternatives without appending both paths to the same transcript.
+| Flag | Behavior | Best Use |
+|---|---|---|
+| `--continue` | Resumes the most recent conversation in the current directory without prompting | Returning to the latest in-progress work in a project |
+| `--resume` (`-r`) | Resumes a specific saved session, opening a picker if no identifier is given | Selecting a specific historical session or an explicitly named session |
+| `--session-id <UUID>` | Uses (or creates) a session with a specific UUID | Programmatic workflows that need a stable, known identifier |
+| `--fork-session` | Creates a new session branched from an existing transcript | Exploring an alternative path without contaminating the original |
 
-Use a named or specific session when returning to a known investigation. Use `--continue` only when the most recent conversation is definitely the one you want.
+Use a named or specific session when returning to a known investigation. Use `--continue` only when the most recent conversation is definitely the one you want — in a directory where you've worked on multiple unrelated tasks, "the latest" can be the wrong session.
+
+`--fork-session` is the right tool when you want to evaluate two different approaches starting from the same prior state. The original session is preserved untouched; the fork is a separate transcript whose history is a copy of the original at the fork point. This is preferable to resuming the original twice and trying to keep two diverging conversations straight, and preferable to copying-and-pasting context into a fresh session, which loses tool-call history.
 
 If the codebase changed since the previous session:
 
 - Resume and tell Claude exactly which files or functions changed when most prior context remains useful.
 - Start fresh with a summary when the old transcript is likely stale or misleading.
 
-Sessions persist conversation history, not the filesystem state. If you need isolated file changes, use git branches or worktrees. For comparing two alternative implementations, fork or branch the session when available so each approach can evolve independently. For parallel filesystem work, use separate worktrees to prevent edits from colliding.
+Sessions persist conversation history, not filesystem state. If you need isolated file changes, use git branches or worktrees. For comparing two alternative implementations, fork the session so each approach can evolve independently *and* use a separate worktree so the file changes do not collide. Forking the session without isolating the files leaves both attempts editing the same checkout; isolating files without forking the session intermingles the conversation transcripts.
 
 Avoid resuming the same session in multiple terminals at once. Both processes can append to the same session history, making later resumes confusing.
 
@@ -1042,9 +1278,16 @@ This helps when context compacts or when another session must pick up the work.
 
 ### CLAUDE.md and Memory
 
-`CLAUDE.md` files store project or user memory: build commands, conventions, architecture notes, testing standards, and workflow preferences.
+`CLAUDE.md` files store project or user memory: build commands, conventions, architecture notes, testing standards, and workflow preferences. They are auto-loaded into Claude Code's context based on a hierarchy:
 
-Use `/memory` to inspect and edit loaded memory files. This is the first diagnostic step when Claude inconsistently follows project conventions: confirm the expected memory file is loaded before adding more instructions.
+- The root `CLAUDE.md` at the repository root applies to the whole project.
+- Subdirectory `CLAUDE.md` files apply to work in that subtree, layered on top of the root.
+- A user-level memory file applies across all projects for that user.
+- Imports using `@path/to/file.md` syntax pull in additional shared content without copy-pasting; this is the right way to reuse a standards document across multiple `CLAUDE.md` files.
+
+When multiple files are loaded, more specific files refine or override more general ones for the area they cover. The user-level memory is for personal preferences (preferred commit message style, preferred test command shortcuts) — not team-wide rules, which belong in repo-tracked `CLAUDE.md` files so all collaborators benefit.
+
+Use `/memory` to inspect and edit loaded memory files. This is the first diagnostic step when Claude inconsistently follows project conventions: confirm the expected memory file is loaded before adding more instructions. If the rule is in a memory file that isn't being loaded for the current working directory, no amount of additional prompting will fix the behavior — the problem is the loading scope, not the rule's wording.
 
 Prefer scoped memory:
 
@@ -1053,7 +1296,9 @@ Prefer scoped memory:
 - `@imports` to reuse shared standards without duplicating content.
 - Personal memory for individual preferences, not team rules.
 
-Do not put every occasional workflow into global memory. A code-review checklist belongs in a slash command or review subagent if it is only relevant during reviews.
+Do not put every occasional workflow into global memory. A code-review checklist belongs in a slash command or review subagent if it is only relevant during reviews. Memory files are read on every turn — bloating them with workflow-specific content costs tokens and dilutes the parts that matter for ordinary work.
+
+The mechanism for project memory is `CLAUDE.md` files plus `@import` references. There is no separate "rules directory with YAML frontmatter" mechanism — proposals that suggest a `.claude/rules/` folder with per-rule frontmatter for path scoping are not the standard model. Path scoping is achieved by placing `CLAUDE.md` files at the appropriate directory level so that work in that subtree picks them up; sharing across files is achieved with `@imports`. If you encounter advice to add YAML-frontmatter rule files, treat it as not how Claude Code's memory system actually loads context.
 
 ### Slash Commands
 
@@ -1067,7 +1312,14 @@ Project commands are shared with the repo; user commands are personal. MCP promp
 
 ### Hooks and Permissions
 
-Hooks run at lifecycle events such as before a tool call, after a tool call, or when a session starts. A `PreToolUse` hook can block a dangerous command before it runs. This is the correct class of mechanism for "must always require approval" policies.
+Hooks run at lifecycle events. The most common ones to know are:
+
+- **`PreToolUse`** — fires before a tool call. Can deny the call, allow it, ask the user for approval, defer (let normal permission rules decide), inject additional context the model will see, or modify the tool's input. This is the correct class of mechanism for "must always require approval" policies.
+- **`PostToolUse`** — fires after a tool call. Useful for logging, formatting, secondary checks, or appending follow-up context.
+- **`UserPromptSubmit`** — fires when the user submits a prompt. Can block the submission, modify it, or attach extra context.
+- **`SessionStart`** — fires once when a session begins. Useful for loading project context, setting up environment variables, or running pre-flight checks.
+
+A `PreToolUse` hook is the canonical way to enforce hard rules in Claude Code: matching tool name and parameters against an allow/deny list, requiring confirmation for destructive shell commands, blocking edits to generated files, or refusing writes outside an approved directory. Because hooks run as code in your environment, they cannot be talked around by the model — that is exactly why they are the right place for hard rules.
 
 Examples:
 
@@ -1076,7 +1328,7 @@ Examples:
 - Run a formatter after successful edits.
 - Add environment context at session start.
 
-Hooks execute shell commands in your environment. Treat them as code with security implications.
+Hooks execute shell commands in your environment. Treat them as code with security implications: a malicious or buggy hook can damage your system or exfiltrate data. Review hook configurations from third-party sources before enabling them, and avoid putting secrets in arguments that hook commands can log.
 
 ### Subagents
 
@@ -1092,6 +1344,13 @@ Good subagent design:
 Avoid making every subagent inherit every tool. Tool restriction improves focus and security.
 
 In Agent SDK and Claude Code configurations, delegation still requires the agent to have access to the tool or mechanism that launches subagents. If an agent describes a delegation but no subagent runs, check tool permissions and whether the subagent invocation tool is allowed.
+
+A subagent does not inherit the parent's conversation. When the parent launches it, the subagent receives its AgentDefinition (its own system prompt, allowed tools, model selection) and the prompt string the parent constructed for that specific invocation. It does not see the parent's earlier turns, prior tool results, or any other subagent's output. This is intentional — it keeps subagent context focused — but it means the parent must restate every fact the subagent will need. Treat the prompt to a subagent like a brief to a contractor: assume nothing carries over.
+
+Two practical consequences:
+
+- **Don't assume the subagent "remembers" your project.** If the subagent needs the project's coding conventions, paste or reference them in the prompt. CLAUDE.md will not always be loaded into the subagent's context unless its definition does so.
+- **Don't expect a "second invocation" of the same subagent to continue where the first left off.** Each call is fresh. If state needs to persist across invocations, the parent persists it (in a file, in a structured note) and re-supplies the relevant slice with each call.
 
 ### Common Pitfalls
 
@@ -1122,6 +1381,10 @@ For coding:
 For uncertain requirements, ask Claude to interview the user or surface decisions before implementation. This is especially useful for caching, real-time architecture, auth changes, or data consistency requirements.
 
 For formatting defects, fix one visible class at a time and verify. Avoid broad rewrites that introduce new regressions.
+
+The most effective feedback is concrete enough that the model can locate the failure: a specific failing input, the expected output, the actual output, the validation error, or the failing test name with its assertion message. "It's not handling edge cases" gives the model nothing to act on; "for input X, the expected key `service_visits` is missing because the source uses 'maintenance entries' instead of 'service visits'" lets the model fix exactly that. When iterating on extraction or generation tasks, pair each failure with the specific source excerpt that triggered it and the rule that was violated.
+
+When the same defect keeps recurring across several runs of the same prompt, treat that as a signal that the prompt or schema needs a structural change — adding a few-shot example, splitting a tool into more specific tools, or surfacing a new field — rather than a sign that the model needs another retry. Prompt-level fixes generalize; per-instance retries do not.
 
 ### Test Generation Quality
 
@@ -1170,7 +1433,12 @@ Aggregate accuracy can be misleading. A pipeline that is 97% accurate overall ma
 
 ### What to Know
 
-The Message Batches API processes many Messages API requests asynchronously. It supports the same general request shape as Messages API calls, including model, messages, tools, and system prompts. Each request has a `custom_id` used to match results.
+The Message Batches API processes many Messages API requests asynchronously. Each batch is submitted as a set of independent requests; the API processes them in the background and returns results when the batch ends. Each request inside the batch supports the same general request shape as a Messages API call — model, messages, tools, system prompt — and each carries a `custom_id` chosen by the client.
+
+The two most important properties to remember:
+
+- **Discount.** Batch processing is offered at roughly half the cost of standard synchronous calls. The exact figure to remember is approximately 50% off the equivalent on-demand pricing.
+- **Window.** A batch can take up to 24 hours to complete. In practice many batches finish much sooner, but you cannot rely on faster completion. Design SLAs around the 24-hour worst case, not the typical case.
 
 Batching is useful when:
 
@@ -1187,21 +1455,23 @@ Batching is a poor fit when:
 - Each step depends on the previous result.
 - Humans need immediate feedback to continue.
 
-Anthropic's docs describe batch usage as discounted relative to standard API calls and note that batches can take up to 24 hours to complete. Results may not be ordered like inputs, so `custom_id` is mandatory for reliable processing.
+Results may not be ordered like inputs, so `custom_id` is mandatory for reliable processing. The application matches each result back to its original request by `custom_id` — never by position. A duplicated or reused `custom_id` will make matching ambiguous; use stable, unique identifiers (often the source record's primary key) so re-running a partial batch is straightforward.
 
 Operational details to know:
 
 - A batch has a processing status such as in progress, canceling, or ended.
 - Individual results can succeed, error, be canceled, or expire.
 - Batch results are returned as JSONL and should be streamed or processed incrementally for large jobs.
-- Validate your request shape with the standard Messages API before submitting a large batch.
+- Validate your request shape with the standard Messages API before submitting a large batch — a single malformed request will not fail the batch, but it will produce a per-request error you must reconcile.
 - Batch size and request count have platform limits, so large pipelines may need multiple batches.
 
 ### SLA Design
 
-When documents arrive continuously, choose a batch cadence based on deadline minus worst-case processing window and operational buffer.
+When documents arrive continuously, choose a batch cadence based on deadline minus worst-case processing window and operational buffer. The arithmetic is mechanical: a record submitted at the next batch run has to wait up to (interval until next run) + (batch processing time, up to 24 hours) + (post-processing) before its result is usable. The slowest record sets the worst case, not the average.
 
-Example: if results must be available within 30 hours and processing may take up to 24 hours, submitting once at the end of the day can violate the SLA for early-day arrivals. Submit smaller periodic batches so each document enters processing with enough buffer.
+Example: if results must be available within 30 hours and batch processing may take up to 24 hours, leaving a 6-hour buffer for downstream work, the maximum acceptable interval between submissions is six hours. Anything longer means a record that arrives just after a submission can wait long enough that the deadline is missed. With a six-hour cadence, the worst case is a record that arrives one second after submission and must wait six hours to enter the next batch — combined with the 24-hour batch worst case, that totals 30 hours, exactly at the SLA boundary. To leave any margin at all, choose a cadence shorter than (deadline − batch window − processing buffer).
+
+A second example: if the SLA is 36 hours and the batch worst case is 24 hours, the cadence can stretch to roughly 12 hours. If the SLA is 26 hours, the cadence must drop to 2 hours or less, because there is almost no margin. Tightening the cadence costs more API calls and orchestration overhead but is the only way to honor a tight SLA against a 24-hour batch ceiling. Submitting "once a day" is only safe when the SLA is at least 48 hours and you are willing to absorb tail latency.
 
 ### Failure Handling
 
@@ -1244,54 +1514,67 @@ Prompt caching can reduce costs for repeated context in some workflows, but it d
 - Use clear names and 3-4 sentence descriptions for nontrivial tools.
 - Include examples for complex nested inputs.
 - Use lookup-then-act for ambiguous entities.
+- Atomic operations for race-prone work (find_and_book together, not find then book).
 - Split tools when required parameters differ by operation.
 - Use progressive discovery for very large tool sets instead of exposing every tool at once.
 - Return structured IDs and metadata for chaining.
 - Accept stable IDs in downstream tools when intermediate lookup fields are mechanical.
+- Pagination: return first page plus cursor and total_count; do not dump every record.
+- Add `requires_review` and decision hints to outputs that may need human judgment.
 - Empty result is success with no matches, not an error.
 - Use preview-token-execute for mandatory confirmation.
-- Enforce hard limits in code, not prompts.
+- Enforce hard limits in code, not prompts; threshold values should come from server-controlled state, not model-provided parameters.
 
 ### Error Handling
 
-- Retry transient read/infrastructure failures inside the tool when safe.
+- Retry transient read/infrastructure failures inside the tool when safe (network blips, 503, rate limit).
 - Return validation and business errors with structured, non-retryable metadata.
-- Treat write timeouts as uncertain state unless idempotency proves otherwise.
-- MCP protocol errors are JSON-RPC errors; tool execution errors are `isError: true`.
+- Treat write timeouts as uncertain state unless idempotency proves otherwise — the side effect may have happened.
+- Distinguish "no rows found" (empty success) from "tool failed" (error) — a missing record is data, not a bug.
+- MCP protocol errors are JSON-RPC errors (missing required parameter, unknown method); tool execution errors return `isError: true` (404, 503, denied).
+- Repeated identical failures with the same input mean switch strategies, not retry harder.
 - Do not use exceptions for expected business failures.
 
 ### Structured Extraction
 
 - Use structured outputs or tool use with schema for reliable structured output.
 - Optional/nullable fields prevent forced hallucination.
+- Distinguish null (unknown / not present) from empty array (asked-and-found-none).
 - Add `unclear`, `other`, or detail fields when categories are ambiguous or evolving.
 - Use few-shot examples for varied document layouts and edge cases.
+- Pair stated and calculated totals (e.g., `stated_total` and `calculated_total`) so reconciliation is automatic.
 - Validate semantics after schema validation.
-- Correct with validation-error feedback.
+- Correct with validation-error feedback — a re-prompt that includes the source plus the validation errors fixes far more cases than a blind retry.
+- Recognize when retries cannot help: if the source genuinely lacks the information, no retry will produce it.
 - Use pre-extraction mapping/summarization for long documents with scattered facts.
 - Add source locations for auditability.
+- Capture `detected_pattern` / `rule_id` for review-agent findings so dismissals become signal.
 - Calibrate confidence before automation.
 - Sample high-confidence outputs to catch hidden errors.
 
 ### Context Management
 
-- Sliding window: simple, loses older context.
-- Progressive summary: preserves narrative decisions and themes.
-- Structured state: best for current preferences.
-- Retrieval/fact store: best for exact numbers, clauses, and quotes.
-- Compress verbose tool results into relevant fields.
-- Returning users need summaries plus fresh lookups.
+- Sliding window: simple, loses older context — appropriate for forum-style or stateless help.
+- Progressive summary: preserves narrative decisions and themes — appropriate for advisor/coach sessions.
+- Structured state: best for current preferences and constraints — appropriate for ordering, planning, configuration.
+- Persistent reference sections (story bibles, allergy lists): for facts that must remain available verbatim.
+- Retrieval/fact store: best for exact numbers, clauses, and quotes pulled on demand.
+- Compress verbose tool results into relevant fields — keep `lookup_order` rather than full menu rows.
+- For returning users, prefer fresh start with a structured summary plus targeted fresh lookups over replaying old tool results.
+- Surface conflicts between user goals; do not average them.
 - Version prompts for long-lived conversations.
 
 ### System Prompts
 
+- Send the system prompt on every request — there is no implicit memory.
 - Use sections and examples.
 - Principles for judgment; explicit conditionals for safety triggers.
 - Move deterministic guarantees into code.
 - Few-shot examples beat long abstract instructions for subtle distinctions.
-- Reinforce critical guidelines at natural breakpoints in long sessions.
-- Ask clarifying questions for irreversible or materially ambiguous actions.
-- State assumptions for low-risk ambiguity.
+- Attention to system prompt weakens with conversation length even when the prompt is included on every call.
+- Reinforce critical guidelines at natural breakpoints in long sessions; version the system prompt across long-lived sessions.
+- Surface contradictions in conflicting goals rather than averaging them.
+- Ask one focused clarifying question for genuinely ambiguous, high-impact actions; state assumptions for low-risk ambiguity.
 
 ### MCP
 
@@ -1300,9 +1583,11 @@ Prompt caching can reduce costs for repeated context in some workflows, but it d
 - Prompts are reusable workflow templates.
 - MCP enables reusable integrations across clients.
 - MCP does not automatically handle auth, retries, or rate limits.
-- Tool annotations are hints, not guarantees.
+- Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) are untrusted hints, not guarantees.
 - Poor descriptions cause poor tool selection.
-- Project MCP config uses `.mcp.json`; local/user Claude Code MCP config uses `~/.claude.json`.
+- JSON-RPC errors for protocol-level failures (missing param, unknown method); `isError: true` tool results for execution failures (404, 503, denied).
+- Project MCP config uses `.mcp.json` at the repo root; local and user Claude Code MCP config both live in `~/.claude.json` at different keys.
+- Progressive availability and `list_changed` notifications keep large tool surfaces tractable.
 
 ### Agentic Patterns
 
@@ -1310,7 +1595,9 @@ Prompt caching can reduce costs for repeated context in some workflows, but it d
 - Routing: classify then dispatch.
 - Orchestrator-workers: coordinator chooses subtasks.
 - Dynamic decomposition: investigative work that changes as facts emerge.
-- Parallel subagents: independent tasks.
+- Parallel subagents: independent tasks; phase as serial decompose → parallel execute → serial synthesize.
+- Subagents do not inherit parent conversation; the parent must include every needed fact in the prompt.
+- The Task/Agent tool must be in the parent's `allowedTools` for delegation to work.
 - Pass context explicitly to subagents.
 - Preserve claim-source-date mappings in research.
 - Restrict tools by subagent role.
@@ -1328,19 +1615,23 @@ Prompt caching can reduce costs for repeated context in some workflows, but it d
 - `--continue` resumes most recent conversation.
 - `--resume` resumes a specific session by ID/name or opens picker.
 - `--session-id` uses a UUID.
-- `--fork-session` branches a prior conversation into a new session.
+- `--fork-session` branches a prior conversation; pair with a separate worktree for isolated parallel work.
+- CLAUDE.md hierarchy: root, subdirectory, user-level; `@imports` reuse shared standards.
 - Use scratchpads for long investigations.
 - Use `/memory` to inspect loaded `CLAUDE.md`.
 - Use slash commands for task-specific reusable workflows.
-- Use `PreToolUse` hooks for deterministic blocking.
+- Hooks: `PreToolUse` (deny/allow/ask/defer/modify-input/inject-context), `PostToolUse`, `UserPromptSubmit`, `SessionStart`.
+- Subagents start fresh — they do not inherit the parent's conversation; the parent must include all needed context.
 
 ### Batch Processing
 
 - Use Message Batches for high-volume asynchronous work.
 - Avoid batch when users need immediate results.
+- Roughly 50% discount versus on-demand calls; up to 24 hours per batch.
 - Use `custom_id` to match unordered results.
 - Resubmit only failures.
 - Chunk context-length failures.
+- Batch cadence ≈ deadline − 24h batch window − processing buffer; submit periodically for tight SLAs.
 - Batch discount does not fix latency or context limits.
 
 ---
