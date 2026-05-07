@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/daronyondem-claude-architect-exam-guide-badge.png)](https://mseep.ai/app/daronyondem-claude-architect-exam-guide)
+
 # Claude Certified Architect - Foundations: Exam Preparation Guide
 
 A comprehensive study guide for developers and solution architects preparing for the **Claude Certified Architect - Foundations** certification exam.
