@@ -42,6 +42,16 @@ The guide was authored with assistance from Claude.
 
 Found an error? Have a suggestion? Feel free to open an issue or submit a pull request.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=daronyondem%2Fclaude-architect-exam-guide&type=timeline&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=daronyondem/claude-architect-exam-guide&type=timeline&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=daronyondem/claude-architect-exam-guide&type=timeline&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=daronyondem/claude-architect-exam-guide&type=timeline&legend=bottom-right" />
+ </picture>
+</a>
+
 ## License
 
 This work is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). You are free to share and adapt it with attribution.
