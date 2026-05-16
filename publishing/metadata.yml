@@ -1,0 +1,42 @@
+title: "Claude Certified Architect - Foundations"
+subtitle: "Exam Preparation Guide"
+author:
+  - "Daron Yondem"
+date: "2026"
+lang: en-US
+publisher: "Independent community guide"
+rights: "Creative Commons Attribution 4.0 International (CC BY 4.0)"
+description: "A community-created study booklet for the Claude Certified Architect - Foundations certification."
+subject: "Claude, Anthropic, LLM applications, certification preparation, and agent architecture"
+keywords: "Claude, Anthropic, LLM, agentic workflows, MCP, certification"
+toc-title: "Contents"
+documentclass: book
+classoption:
+  - oneside
+  - openany
+papersize: letter
+fontsize: 11pt
+geometry:
+  - margin=0.9in
+  - headheight=19pt
+  - headsep=0.18in
+mainfont: "texgyrepagella-regular.otf"
+mainfontoptions:
+  - BoldFont=texgyrepagella-bold.otf
+  - ItalicFont=texgyrepagella-italic.otf
+  - BoldItalicFont=texgyrepagella-bolditalic.otf
+sansfont: "texgyreheros-regular.otf"
+sansfontoptions:
+  - BoldFont=texgyreheros-bold.otf
+  - ItalicFont=texgyreheros-italic.otf
+  - BoldItalicFont=texgyreheros-bolditalic.otf
+monofont: "texgyrecursor-regular.otf"
+monofontoptions:
+  - BoldFont=texgyrecursor-bold.otf
+  - ItalicFont=texgyrecursor-italic.otf
+  - BoldItalicFont=texgyrecursor-bolditalic.otf
+colorlinks: true
+linkcolor: BookAccent
+urlcolor: BookAccent
+citecolor: BookAccent
+filecolor: BookAccent

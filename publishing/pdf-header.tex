@@ -1,0 +1,116 @@
+\usepackage{xcolor}
+\definecolor{BookInk}{HTML}{18212B}
+\definecolor{BookMuted}{HTML}{5E6B78}
+\definecolor{BookAccent}{HTML}{2F80A7}
+\definecolor{BookAccentDark}{HTML}{102A43}
+\definecolor{BookSoft}{HTML}{F2F7FA}
+\definecolor{BookRule}{HTML}{D7E1EA}
+
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{etoolbox}
+\usepackage{fvextra}
+\providecommand{\xmpquote}[1]{#1}
+\providecommand{\BookVersion}{dev}
+\newcommand{\BookRepositoryURL}{https://github.com/daronyondem/claude-architect-exam-guide}
+
+\RecustomVerbatimEnvironment{Highlighting}{Verbatim}{
+  commandchars=\\\{\},
+  breaklines=true,
+  breakanywhere=true,
+  breaksymbolleft={},
+  breaksymbolright={},
+  fontsize=\small
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.64em}
+\setlist{itemsep=0.18em, topsep=0.35em}
+\raggedbottom
+
+\makeatletter
+\newcommand{\@subtitle}{}
+\providecommand{\subtitle}[1]{\gdef\@subtitle{#1}}
+\renewcommand{\maketitle}{
+  \begin{titlepage}
+    \pagecolor{BookSoft}
+    \color{BookInk}
+    \sffamily
+    \vspace*{0.7in}
+    {\Large\color{BookAccentDark} Independent Study Booklet\par}
+    \vspace{0.45in}
+    {\fontsize{30}{36}\selectfont\bfseries\raggedright\hyphenpenalty=10000\exhyphenpenalty=10000 \@title\par}
+    \vspace{0.22in}
+    {\fontsize{21}{27}\selectfont \@subtitle\par}
+    \vspace{0.2in}
+    {\large Version \BookVersion\par}
+    \vspace{0.5in}
+    {\color{BookAccent}\rule{0.72\textwidth}{1.5pt}\par}
+    \vfill
+    {\large \@author\par}
+    \vspace{0.12in}
+    {\large \@date\par}
+    \vspace{0.28in}
+    {\small\color{BookMuted}\href{\BookRepositoryURL}{\BookRepositoryURL}\par}
+    \vspace{0.22in}
+    {\small\color{BookMuted} Community-created. Not affiliated with, endorsed by, or sponsored by Anthropic.\par}
+  \end{titlepage}
+  \nopagecolor
+  \frontmatter
+}
+\makeatother
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily\color{BookMuted}\nouppercase{\leftmark}}
+\fancyhead[R]{\small\sffamily\color{BookMuted}\thepage}
+\renewcommand{\headrulewidth}{0.35pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{BookRule}\leaders\hrule height \headrulewidth\hfill}}
+\fancypagestyle{plain}{
+  \fancyhf{}
+  \fancyfoot[C]{\small\sffamily\color{BookMuted}\thepage}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+\titleformat{\chapter}[display]
+  {\sffamily\bfseries\color{BookAccentDark}}
+  {}
+  {0pt}
+  {\Huge}
+  [\vspace{0.35em}{\color{BookAccent}\titlerule[1.2pt]}]
+\titlespacing*{\chapter}{0pt}{-8pt}{26pt}
+
+\titleformat{\section}
+  {\sffamily\Large\bfseries\color{BookAccentDark}}
+  {}
+  {0pt}
+  {}
+\titlespacing*{\section}{0pt}{1.2em}{0.35em}
+
+\titleformat{\subsection}
+  {\sffamily\large\bfseries\color{BookAccentDark}}
+  {}
+  {0pt}
+  {}
+\titlespacing*{\subsection}{0pt}{1em}{0.25em}
+
+\AtBeginEnvironment{longtable}{\small\setlength{\tabcolsep}{3.5pt}}
+
+\let\oldquote\quote
+\let\endoldquote\endquote
+\renewenvironment{quote}
+  {\begin{tcolorbox}[
+    colback=BookSoft,
+    colframe=BookAccent,
+    boxrule=0.5pt,
+    leftrule=3pt,
+    arc=1.5pt,
+    left=8pt,
+    right=8pt,
+    top=6pt,
+    bottom=6pt
+  ]}
+  {\end{tcolorbox}}

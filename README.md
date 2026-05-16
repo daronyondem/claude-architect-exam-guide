@@ -32,6 +32,28 @@ Plus a **Study Strategy**, **Quick Reference Cheat Sheet**, and **Recommended Re
 
 **[exam-preparation-guide.md](exam-preparation-guide.md)**
 
+## Downloads
+
+PDF and EPUB versions are published from tagged releases. See the repository's [GitHub Releases](https://github.com/daronyondem/claude-architect-exam-guide/releases) for downloadable study booklet formats.
+
+## Building the Booklet
+
+Release assets are generated from `exam-preparation-guide.md` with Pandoc. The Markdown file remains the source of truth, while the files in `publishing/` provide booklet metadata, front matter, PDF styling, EPUB styling, and the cover image.
+
+To build locally:
+
+```bash
+./scripts/build-release-assets.sh
+```
+
+The script writes generated files to `dist/`. EPUB generation requires Pandoc. PDF generation also requires `xelatex`. If `rsvg-convert` is available, the EPUB cover is converted to PNG for broader reader compatibility.
+
+For local test builds, the generated title pages use `Version: dev`. Tagged releases use the tag name automatically. You can override the displayed version with:
+
+```bash
+RELEASE_VERSION=v1.0.0 ./scripts/build-release-assets.sh
+```
+
 ## Disclaimer
 
 This is an **independent, community-created** study guide. It is not affiliated with, endorsed by, or sponsored by Anthropic. No exam questions are included, paraphrased, or hinted at - this guide teaches the underlying knowledge domains only.
