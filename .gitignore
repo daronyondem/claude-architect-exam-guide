@@ -6,6 +6,9 @@ questions.md
 Thumbs.db
 desktop.ini
 
+# Generated publishing artifacts
+dist/
+
 # Editor files
 *.swp
 *.swo

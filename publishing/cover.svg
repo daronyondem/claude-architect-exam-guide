@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2560" viewBox="0 0 1600 2560" role="img" aria-labelledby="title desc">
+  <title id="title">Claude Certified Architect - Foundations: Exam Preparation Guide</title>
+  <desc id="desc">A clean technical booklet cover with a simple architectural grid motif.</desc>
+  <rect width="1600" height="2560" fill="#f2f7fa"/>
+  <rect x="116" y="116" width="1368" height="2328" rx="0" fill="#ffffff" stroke="#d7e1ea" stroke-width="4"/>
+  <g opacity="0.9">
+    <path d="M216 456H1384" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M216 576H1384" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M216 696H1384" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M216 816H1384" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M332 340V932" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M564 340V932" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M796 340V932" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M1028 340V932" stroke="#d7e1ea" stroke-width="3"/>
+    <path d="M1260 340V932" stroke="#d7e1ea" stroke-width="3"/>
+  </g>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M332 696L564 456L796 696L1028 456L1260 696" stroke="#2f80a7" stroke-width="18"/>
+    <path d="M332 816L564 576L796 816L1028 576L1260 816" stroke="#102a43" stroke-width="10" opacity="0.72"/>
+    <circle cx="332" cy="696" r="22" fill="#2f80a7" stroke="none"/>
+    <circle cx="564" cy="456" r="22" fill="#2f80a7" stroke="none"/>
+    <circle cx="796" cy="696" r="22" fill="#2f80a7" stroke="none"/>
+    <circle cx="1028" cy="456" r="22" fill="#2f80a7" stroke="none"/>
+    <circle cx="1260" cy="696" r="22" fill="#2f80a7" stroke="none"/>
+  </g>
+  <text x="216" y="1160" fill="#102a43" font-family="Inter, Avenir Next, Helvetica, Arial, sans-serif" font-size="74" font-weight="800">
+    <tspan x="216" dy="0">Claude Certified</tspan>
+    <tspan x="216" dy="88">Architect</tspan>
+    <tspan x="216" dy="88">Foundations</tspan>
+  </text>
+  <rect x="216" y="1452" width="520" height="10" fill="#2f80a7"/>
+  <text x="216" y="1586" fill="#18212b" font-family="Inter, Avenir Next, Helvetica, Arial, sans-serif" font-size="44" font-weight="600">Exam Preparation Guide</text>
+  <text x="216" y="2150" fill="#5e6b78" font-family="Inter, Avenir Next, Helvetica, Arial, sans-serif" font-size="30">Independent community study booklet</text>
+  <text x="216" y="2210" fill="#5e6b78" font-family="Inter, Avenir Next, Helvetica, Arial, sans-serif" font-size="30">CC BY 4.0</text>
+</svg>

@@ -1,0 +1,59 @@
+name: Release assets
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-assets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install publishing dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pandoc \
+            texlive-xetex \
+            texlive-latex-extra \
+            texlive-fonts-recommended \
+            fonts-dejavu \
+            librsvg2-bin
+
+      - name: Build PDF and EPUB
+        run: ./scripts/build-release-assets.sh
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-architect-exam-guide
+          path: |
+            dist/claude-architect-exam-guide.pdf
+            dist/claude-architect-exam-guide.epub
+
+      - name: Attach assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              dist/claude-architect-exam-guide.pdf \
+              dist/claude-architect-exam-guide.epub \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              dist/claude-architect-exam-guide.pdf \
+              dist/claude-architect-exam-guide.epub \
+              --title "$RELEASE_TAG" \
+              --notes "Download the study guide as a polished PDF booklet or EPUB."
+          fi
