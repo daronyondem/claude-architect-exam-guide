@@ -83,7 +83,7 @@ if command -v xelatex >/dev/null 2>&1; then
     "--lua-filter=$ROOT_DIR/publishing/fit-tables.lua" \
     "--include-in-header=$VERSION_TEX" \
     "--include-in-header=$ROOT_DIR/publishing/pdf-header.tex" \
-    "--syntax-highlighting=tango" \
+    "--highlight-style=tango" \
     -o "$PDF_OUT"
 elif [[ "${SKIP_PDF_ON_MISSING_ENGINE:-0}" == "1" ]]; then
   echo "xelatex not found; skipped PDF build because SKIP_PDF_ON_MISSING_ENGINE=1." >&2
