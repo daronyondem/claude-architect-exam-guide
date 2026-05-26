@@ -1278,27 +1278,97 @@ This helps when context compacts or when another session must pick up the work.
 
 ### CLAUDE.md and Memory
 
-`CLAUDE.md` files store project or user memory: build commands, conventions, architecture notes, testing standards, and workflow preferences. They are auto-loaded into Claude Code's context based on a hierarchy:
+Claude Code has two complementary memory systems, both loaded into context at the start of every session:
 
-- The root `CLAUDE.md` at the repository root applies to the whole project.
-- Subdirectory `CLAUDE.md` files apply to work in that subtree, layered on top of the root.
-- A user-level memory file applies across all projects for that user.
-- Imports using `@path/to/file.md` syntax pull in additional shared content without copy-pasting; this is the right way to reuse a standards document across multiple `CLAUDE.md` files.
+- **CLAUDE.md and rule files** — instructions you write to give Claude persistent context: build commands, conventions, architecture notes, testing standards, workflow preferences.
+- **Auto memory** — notes Claude maintains for itself, capturing build commands, debugging insights, and preferences it discovers from your corrections.
 
-When multiple files are loaded, more specific files refine or override more general ones for the area they cover. The user-level memory is for personal preferences (preferred commit message style, preferred test command shortcuts) — not team-wide rules, which belong in repo-tracked `CLAUDE.md` files so all collaborators benefit.
+Both are loaded as *context*, not as enforced configuration. The model reads them and tries to follow them, but there is no compliance guarantee. For behavior that must apply regardless of what Claude decides — destructive Bash approval, blocked file paths, mandatory formatters — use hooks or `permissions.deny`. Memory shapes behavior; hooks enforce it.
 
-Use `/memory` to inspect and edit loaded memory files. This is the first diagnostic step when Claude inconsistently follows project conventions: confirm the expected memory file is loaded before adding more instructions. If the rule is in a memory file that isn't being loaded for the current working directory, no amount of additional prompting will fix the behavior — the problem is the loading scope, not the rule's wording.
+#### CLAUDE.md hierarchy
 
-Prefer scoped memory:
+CLAUDE.md files can live at several scopes. All discovered files are concatenated, with broader scopes loaded first and more-specific scopes loaded last so local instructions appear closest to the end of context:
 
-- Root `CLAUDE.md` for repo-wide rules.
-- Subdirectory `CLAUDE.md` files for area-specific conventions.
-- `@imports` to reuse shared standards without duplicating content.
-- Personal memory for individual preferences, not team rules.
+| Scope | Location | Purpose |
+|---|---|---|
+| Managed policy | OS-specific path (e.g. `/Library/Application Support/ClaudeCode/CLAUDE.md` on macOS) | Organization-wide rules deployed by IT; cannot be excluded |
+| User | `~/.claude/CLAUDE.md` | Personal preferences across all projects |
+| Project | `./CLAUDE.md` or `./.claude/CLAUDE.md` | Team-shared, committed to the repo |
+| Local | `./CLAUDE.local.md` | Personal project-only preferences; gitignored |
 
-Do not put every occasional workflow into global memory. A code-review checklist belongs in a slash command or review subagent if it is only relevant during reviews. Memory files are read on every turn — bloating them with workflow-specific content costs tokens and dilutes the parts that matter for ordinary work.
+`CLAUDE.md` (and `CLAUDE.local.md`) files in the working directory and any ancestor directory load fully at launch — Claude walks up the tree from where it was invoked and reads each one it finds. Files in *subdirectories* below the working directory load on demand when Claude reads files in those subtrees, so nested `CLAUDE.md` does not consume context until it is needed.
 
-The mechanism for project memory is `CLAUDE.md` files plus `@import` references. There is no separate "rules directory with YAML frontmatter" mechanism — proposals that suggest a `.claude/rules/` folder with per-rule frontmatter for path scoping are not the standard model. Path scoping is achieved by placing `CLAUDE.md` files at the appropriate directory level so that work in that subtree picks them up; sharing across files is achieved with `@imports`. If you encounter advice to add YAML-frontmatter rule files, treat it as not how Claude Code's memory system actually loads context.
+Imports using `@path/to/file.md` syntax pull in additional content (relative or absolute paths, up to five hops deep). Imported files are expanded into context at launch, so imports help organization but do not save tokens.
+
+For large monorepos, the `claudeMdExcludes` setting skips ancestor `CLAUDE.md` files from other teams that aren't relevant to your work. Managed policy `CLAUDE.md` cannot be excluded — it always applies.
+
+If a repository already has an `AGENTS.md` for other coding agents, create a `CLAUDE.md` that imports it (`@AGENTS.md`) or symlinks to it so both tools read the same instructions without duplication.
+
+#### `.claude/rules/` for scoped instructions
+
+For larger projects, keep `CLAUDE.md` focused on rules that should be present in every session and move topic- or area-specific instructions into the `.claude/rules/` directory. Each `.md` file there is treated as a rule; subdirectories are walked recursively.
+
+Rules can be scoped to specific file paths using YAML frontmatter with a `paths` glob list. The rule only enters context when Claude reads matching files:
+
+```markdown
+---
+paths:
+  - "src/api/**/*.ts"
+  - "tests/**/*.test.ts"
+---
+
+# API Development Rules
+
+- All endpoints must include input validation.
+- Use the standard error response format.
+```
+
+A rule with no `paths` frontmatter loads unconditionally at the same priority as `.claude/CLAUDE.md`. With `paths`, it triggers only when Claude reads matching files. Personal rules can live in `~/.claude/rules/` and apply across every project on your machine; project rules take priority where they overlap.
+
+Use `.claude/rules/` instead of one large `CLAUDE.md` when instructions are large enough that loading them every session wastes context, when different areas of the codebase have meaningfully different conventions, or when multiple teams need to maintain their own area-specific rule files without conflicts. Use `CLAUDE.md` (not rules) for instructions that should genuinely be present in every session: project-wide conventions, build commands, the architecture summary every contributor needs.
+
+#### Auto memory
+
+Auto memory is a separate system Claude maintains for itself, stored per project at `~/.claude/projects/<project>/memory/`. Claude reads and writes files there during your session to record build commands, debugging insights, architecture notes, code-style preferences, and workflow habits it discovers.
+
+The directory holds a `MEMORY.md` entrypoint plus optional topic files (`debugging.md`, `api-conventions.md`, and so on). The first 200 lines or 25KB of `MEMORY.md` — whichever comes first — load at the start of every conversation. Topic files do not load at session start; Claude reads them on demand.
+
+Auto memory is machine-local. All worktrees and subdirectories within the same git repository share one auto memory directory, but auto memory does not sync across machines or cloud environments. It is on by default; toggle inside `/memory`, set `autoMemoryEnabled: false` in project settings, or set `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` to disable.
+
+#### CLAUDE.md vs rules vs skills vs hooks
+
+These four mechanisms shape Claude Code behavior, and exam scenarios often hinge on choosing the right one:
+
+| Mechanism | When loaded | What it does | Use for |
+|---|---|---|---|
+| `CLAUDE.md` | Every session | Soft guidance (context) | Project-wide rules, architecture, conventions needed every session |
+| `.claude/rules/` | Every session, or only when matching paths are read | Soft guidance (context) | Topic- or area-specific instructions; scope via `paths:` globs |
+| Skills | On demand | Soft guidance with a structured procedure | Multi-step workflows invoked intentionally or recognized from a description |
+| Hooks | Lifecycle events (`PreToolUse`, `PostToolUse`, etc.) | Hard enforcement (commands in Claude Code; callback functions in the Agent SDK) | Allow/deny rules, formatters, mandatory approvals |
+
+The rule of thumb: if it is a fact Claude should know in every session, put it in `CLAUDE.md`. If it only matters in part of the codebase, put it in `.claude/rules/` with `paths:`. If it is a multi-step procedure invoked deliberately, it is a skill. If it must run deterministically regardless of what the model decides, it is a hook.
+
+#### Inspecting and debugging memory
+
+Use `/memory` to list every `CLAUDE.md`, `CLAUDE.local.md`, and rule file currently loaded, browse auto-memory contents, and open files for editing. This is the first diagnostic step when Claude inconsistently follows project conventions: confirm the expected file is loaded before adding more instructions. If a rule is in a file that isn't being loaded for the current working directory, no amount of additional prompting will fix the behavior — the problem is the loading scope, not the wording.
+
+For deeper debugging — especially with path-scoped rules or nested `CLAUDE.md` files that load lazily — use the `InstructionsLoaded` hook, which logs exactly which instruction files load, when, and why.
+
+#### Prefer scoped memory
+
+Within memory itself, prefer the narrowest scope that captures the rule:
+
+- Repo-wide standards belong in project `CLAUDE.md` (`./CLAUDE.md` or `./.claude/CLAUDE.md`).
+- Area-specific conventions belong in subdirectory `CLAUDE.md`, or path-scoped rules in `.claude/rules/` with `paths:` globs.
+- Reused standards: `@imports` to share content across `CLAUDE.md` files (imports still consume context at launch).
+- Personal preferences: `~/.claude/CLAUDE.md`, `~/.claude/rules/`, or `CLAUDE.local.md` — not team-wide rules, which belong in repo-tracked files so all collaborators benefit.
+
+Do not put every occasional workflow into global memory, and be precise about what kind of scoping you need. These are not interchangeable:
+
+- **Task-scoped** (only relevant when the user is doing a particular activity — a code review, a release, a migration plan): use a slash command, skill, or specialized subagent. These mechanisms are invoked deliberately.
+- **Path- or area-scoped** (only relevant when Claude reads files in a particular part of the codebase — API endpoints, tests, generated files): use path-scoped rules in `.claude/rules/` with `paths:` globs. These trigger from matching file reads, not from "the user is doing X."
+
+Picking the wrong scoping is a common mistake — a code-review checklist does not belong in `.claude/rules/` even if you can write a `paths:` glob that approximates "files in review," because the rule will fire whenever Claude touches those files outside a review too. `CLAUDE.md` files are read every session, so bloating them with either kind of conditional content costs tokens and dilutes the parts that matter for ordinary work.
 
 ### Slash Commands
 
@@ -1328,7 +1398,7 @@ Examples:
 - Run a formatter after successful edits.
 - Add environment context at session start.
 
-Hooks execute shell commands in your environment. Treat them as code with security implications: a malicious or buggy hook can damage your system or exfiltrate data. Review hook configurations from third-party sources before enabling them, and avoid putting secrets in arguments that hook commands can log.
+Hooks execute as code in your environment — shell commands in Claude Code, callback functions in the Agent SDK. Treat them as code with security implications: a malicious or buggy hook can damage your system or exfiltrate data. Review hook configurations from third-party sources before enabling them, and avoid passing secrets through arguments that hooks may log.
 
 ### Subagents
 
@@ -1357,7 +1427,8 @@ Two practical consequences:
 - **Using plan mode for tiny edits.** It adds overhead.
 - **Using direct execution for broad migrations.** You lose review and architecture planning.
 - **Assuming all session resumes are safe.** Old context may reference changed code.
-- **Using a global `CLAUDE.md` for task-specific checklists.** Use slash commands or subagents.
+- **Using a global `CLAUDE.md` for task-specific checklists.** Use slash commands, skills, or path-scoped `.claude/rules/` files — they don't bloat context on every session.
+- **Treating memory as enforcement.** `CLAUDE.md` and rule files are context, not configuration. Hard rules belong in `PreToolUse` hooks or `permissions.deny`.
 - **Relying on prompt instructions for destructive Bash approval.** Use hooks/permissions.
 
 ---
@@ -1616,9 +1687,13 @@ Prompt caching can reduce costs for repeated context in some workflows, but it d
 - `--resume` resumes a specific session by ID/name or opens picker.
 - `--session-id` uses a UUID.
 - `--fork-session` branches a prior conversation; pair with a separate worktree for isolated parallel work.
-- CLAUDE.md hierarchy: root, subdirectory, user-level; `@imports` reuse shared standards.
+- `CLAUDE.md` scopes (broad → specific): managed policy → user (`~/.claude/CLAUDE.md`) → project (`./CLAUDE.md` or `./.claude/CLAUDE.md`) → local (`CLAUDE.local.md`).
+- Ancestor `CLAUDE.md` loads fully at launch; subdirectory `CLAUDE.md` loads on demand. `@imports` reuse content but still load fully at launch.
+- `.claude/rules/` for scoped instructions; YAML `paths:` frontmatter loads a rule only when Claude reads matching files. `~/.claude/rules/` for user-level rules.
+- Auto memory at `~/.claude/projects/<project>/memory/`; first 200 lines or 25KB of `MEMORY.md` loaded each session, topic files on demand.
+- Mechanism choice: `CLAUDE.md` = always-on context; rules = scoped context; skills = on-demand procedures; hooks = hard enforcement.
 - Use scratchpads for long investigations.
-- Use `/memory` to inspect loaded `CLAUDE.md`.
+- Use `/memory` to inspect loaded `CLAUDE.md`, rules, and auto memory; use the `InstructionsLoaded` hook to debug lazy/path-scoped loading.
 - Use slash commands for task-specific reusable workflows.
 - Hooks: `PreToolUse` (deny/allow/ask/defer/modify-input/inject-context), `PostToolUse`, `UserPromptSubmit`, `SessionStart`.
 - Subagents start fresh — they do not inherit the parent's conversation; the parent must include all needed context.
@@ -1684,22 +1759,22 @@ When faced with a scenario, identify:
 
 ### Official Anthropic Documentation
 
-- [Messages API examples](https://docs.anthropic.com/en/api/messages-examples) - Stateless Messages API and conversation-history structure.
-- [Tool use with Claude](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview) - Tool-use concepts, pricing/token implications, and examples.
-- [Define tools](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/implement-tool-use) - Tool definitions, descriptions, schemas, and `tool_choice`.
-- [Structured outputs](https://docs.anthropic.com/en/docs/build-with-claude/structured-outputs) - JSON structured outputs and strict tool use.
-- [Batch processing](https://docs.anthropic.com/en/docs/build-with-claude/batch-processing) - Message Batches API, asynchronous processing, cost trade-offs.
-- [Long context prompting tips](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/long-context-tips) - Prompt structure for long documents and retrieval-heavy tasks.
-- [Citations](https://docs.anthropic.com/en/docs/build-with-claude/citations) - Source-grounded responses and citation constraints.
-- [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference) - `--continue`, `--resume`, `--session-id`, output formats, and permission modes.
+- [Messages API examples](https://platform.claude.com/docs/en/api/messages-examples) - Stateless Messages API and conversation-history structure.
+- [Tool use with Claude](https://platform.claude.com/docs/en/docs/agents-and-tools/tool-use/overview) - Tool-use concepts, pricing/token implications, and examples.
+- [Define tools](https://platform.claude.com/docs/en/docs/agents-and-tools/tool-use/implement-tool-use) - Tool definitions, descriptions, schemas, and `tool_choice`.
+- [Structured outputs](https://platform.claude.com/docs/en/docs/build-with-claude/structured-outputs) - JSON structured outputs and strict tool use.
+- [Batch processing](https://platform.claude.com/docs/en/docs/build-with-claude/batch-processing) - Message Batches API, asynchronous processing, cost trade-offs.
+- [Long context prompting tips](https://platform.claude.com/docs/en/docs/build-with-claude/prompt-engineering/long-context-tips) - Prompt structure for long documents and retrieval-heavy tasks.
+- [Citations](https://platform.claude.com/docs/en/docs/build-with-claude/citations) - Source-grounded responses and citation constraints.
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) - `--continue`, `--resume`, `--session-id`, output formats, and permission modes.
 - [Agent SDK sessions](https://code.claude.com/docs/en/agent-sdk/sessions) - Continue, resume, fork, and session persistence behavior.
-- [Claude Code common workflows](https://docs.anthropic.com/en/docs/claude-code/tutorials) - Plan mode, sessions, worktrees, subagents, and automation workflows.
-- [Claude Code memory](https://docs.anthropic.com/en/docs/claude-code/memory) - `CLAUDE.md`, `/memory`, and memory scoping.
-- [Claude Code slash commands](https://docs.anthropic.com/en/docs/claude-code/slash-commands) - Built-in and custom slash commands.
-- [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) - `PreToolUse`, hook outputs, and blocking behavior.
-- [Claude Code MCP](https://docs.anthropic.com/en/docs/claude-code/mcp) - MCP server scopes and configuration in Claude Code.
-- [Claude Agent SDK overview](https://docs.anthropic.com/en/docs/claude-code/sdk) - Programmable agents with built-in tools, hooks, sessions, MCP, and subagents.
-- [Claude Code subagents](https://docs.anthropic.com/en/docs/claude-code/sub-agents) - Subagent contexts, tool limits, and configuration.
+- [Claude Code common workflows](https://code.claude.com/docs/en/tutorials) - Plan mode, sessions, worktrees, subagents, and automation workflows.
+- [Claude Code memory](https://code.claude.com/docs/en/memory) - `CLAUDE.md`, `.claude/rules/` with `paths:` frontmatter, auto memory, `/memory`, `claudeMdExcludes`, and managed-policy `CLAUDE.md`.
+- [Claude Code slash commands](https://code.claude.com/docs/en/slash-commands) - Built-in and custom slash commands.
+- [Claude Code hooks](https://code.claude.com/docs/en/hooks) - `PreToolUse`, hook outputs, and blocking behavior.
+- [Claude Code MCP](https://code.claude.com/docs/en/mcp) - MCP server scopes and configuration in Claude Code.
+- [Claude Agent SDK overview](https://code.claude.com/docs/en/sdk) - Programmable agents with built-in tools, hooks, sessions, MCP, and subagents.
+- [Claude Code subagents](https://code.claude.com/docs/en/sub-agents) - Subagent contexts, tool limits, and configuration.
 
 ### MCP Documentation
 
@@ -1712,5 +1787,5 @@ When faced with a scenario, identify:
 ### Anthropic Engineering and Courses
 
 - [Building effective agents](https://www.anthropic.com/engineering/building-effective-agents) - Agentic workflow patterns and when to use them.
-- [Claude Code best practices](https://www.anthropic.com/engineering/claude-code-best-practices) - Practical development workflow guidance.
+- [Claude Code best practices](https://code.claude.com/docs/en/best-practices) - Practical development workflow guidance.
 - [Anthropic Cookbook](https://github.com/anthropics/anthropic-cookbook) - Implementation examples for tool use, extraction, and workflows.
