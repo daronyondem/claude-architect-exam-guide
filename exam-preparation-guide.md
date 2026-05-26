@@ -1304,7 +1304,7 @@ For large monorepos, the `claudeMdExcludes` setting skips ancestor `CLAUDE.md` f
 
 If a repository already has an `AGENTS.md` for other coding agents, create a `CLAUDE.md` that imports it (`@AGENTS.md`) or symlinks to it so both tools read the same instructions without duplication.
 
-#### `.claude/rules/` for scoped instructions
+#### Claude rules for scoped instructions
 
 For larger projects, keep `CLAUDE.md` focused on rules that should be present in every session and move topic- or area-specific instructions into the `.claude/rules/` directory. Each `.md` file there is treated as a rule; subdirectories are walked recursively.
 
