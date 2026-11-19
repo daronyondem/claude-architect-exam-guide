@@ -2,7 +2,15 @@
 
 ## Overview
 
-This guide teaches the architecture knowledge needed to design, build, and operate production systems with Claude, Claude Code, the Claude Agent SDK, tools, and MCP integrations. It is intentionally scenario-oriented: the exam is likely to test trade-offs, not rote definitions.
+This guide teaches the architecture knowledge needed to design, build, and operate production systems with Claude, Claude Code, the Claude Agent SDK, tools, and MCP integrations. Anthropic's [CCAR-F exam guide (v1.0, effective July 2026)](https://everpath-course-content.s3-accelerate.amazonaws.com/instructor/6nizmqk8tpzpfjvt6qmmav7rh/public/1783542750/Claude+Certified+Architect+%E2%80%93+Foundations+Exam+Guide.pdf) describes a scenario-based exam. Use its domain weights to prioritize practice; the section numbers below are starting points, not a complete mapping.
+
+| Exam domain | Weight | Start with these guide sections |
+|---|---:|---|
+| Agentic Architecture & Orchestration | 27% | 8 (Agentic Patterns), 9 (Production Workflows), 10 (Agent SDK) |
+| Tool Design & MCP Integration | 18% | 2 (Tool Interfaces), 3 (Tool Errors), 7 (MCP) |
+| Claude Code Configuration & Workflows | 20% | 10 (Claude Code Workflows) |
+| Prompt Engineering & Structured Output | 20% | 1 (Output Control), 4 (Extraction), 6 (Prompt Engineering) |
+| Context Management & Reliability | 15% | 3 (Error Handling), 5 (Context Management), 9 (Production Workflows) |
 
 The most important habit is to ask: where should responsibility live?
 
@@ -40,7 +48,7 @@ Use JSON structured outputs when the final assistant response itself should be J
 
 For exam-style architecture questions, the key principle is stable: schema-backed output is more reliable than asking for free-form text that "looks like JSON."
 
-`tool_choice` matters:
+`tool_choice` controls whether Claude can or must call a tool. The forced choices `any` and `tool` apply only when supported by the selected model and thinking configuration; check the [thinking documentation](https://platform.claude.com/docs/en/build-with-claude/thinking).
 
 | Setting | Meaning | Use Case |
 |---|---|---|
@@ -49,21 +57,21 @@ For exam-style architecture questions, the key principle is stable: schema-backe
 | `tool` | Claude must call a specific named tool | A pipeline stage that must produce one schema before enrichment |
 | `none` | Claude cannot call tools | Pure text response or a step where tools are unsafe/unneeded |
 
-`tool_choice: "any"` is especially useful when you have several extraction tools (one per document type) and you want guaranteed tool use without choosing which schema in advance. Setting `auto` with prompt instructions to "use a tool" can still produce conversational text in edge cases; `any` cannot.
+Use `{"type": "any"}` when Claude should pick among several extraction tools and forcing is supported. With `auto`, even a prompt that says "use a tool" can yield a text-only response. Strict tool use enforces the argument schema if a call occurs; it does not make `auto` require a call.
 
-When multiple tools are available but one must run first, use `tool_choice` with a specific tool name (e.g., `{"type": "tool", "name": "extract_metadata"}`) for the first call, receive the structured result, then make subsequent calls for enrichment. Reordering tool definitions or relying on system prompt priority is unreliable.
+When one tool must run first, force that named tool if supported (e.g., `{"type": "tool", "name": "extract_metadata"}`). With `auto`, inspect the response for the required `tool_use` block and do not advance until the application has the required tool result. Reordering tool definitions or relying on system prompt priority is unreliable.
 
 For extraction systems, common patterns are:
 
 1. Use `output_config.format` with a JSON Schema when you want the response body to be validated JSON.
 2. Define an extraction tool whose input schema is the desired output schema when the extraction is modeled as a tool call.
-3. Set `tool_choice` to a required tool or to `any` across several extraction tools when a tool call must happen.
+3. If a tool call must happen, use `tool` or `any` where supported. Otherwise, use `auto` and handle a missing call explicitly. If there is no action to execute and only the final JSON matters, prefer `output_config.format`.
 4. Validate the result in application code.
 5. If semantic validation fails, call Claude again with the source, the invalid extraction, and the validation errors. This validation-error feedback loop is far more effective than retrying the same prompt unchanged.
 
 Tool definitions, tool schemas, output schemas, and tool-use/result blocks count as input tokens or add injected prompt overhead. A large schema (for example, a 12-field tool definition with detailed descriptions consuming ~2,500 tokens) combined with a long document can approach the context limit. When that happens, accuracy degrades on content near the end of the document because the model is processing close to the effective attention boundary. The root cause is total context consumption, not a model defect.
 
-Structured outputs also have operational implications: the first request for a schema may have additional latency while the grammar is compiled; schemas are cached for reuse; very complex schemas can exceed compilation limits; refusals or max-token stops can still produce nonconforming output. Do not treat schema compliance as a substitute for domain validation.
+Structured outputs also have operational implications: the first request for a schema may have additional latency while the grammar is compiled; schemas are cached for reuse; very complex schemas can exceed compilation limits. Before parsing or accepting final JSON, check `stop_reason`: `refusal` can arrive with HTTP 200, and `max_tokens` can leave incomplete JSON. Handle a refusal as a separate outcome and do not accept truncated output. Even complete, schema-conforming JSON still needs domain validation. See [structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs).
 
 ### Partial Assistant Prefill (Legacy)
 
@@ -96,7 +104,7 @@ If users notice slower responses and higher costs in long sessions, the cause is
 - **Treating `session_id` as model memory.** A session identifier can locate stored context in your system, but it does not automatically change what Claude sees.
 - **Forcing text JSON with prompt instructions when tool use is available.** Prompt-only JSON is more fragile than schema-backed tool use.
 - **Ignoring tool-definition token cost.** Large tool schemas reduce the remaining budget for documents, conversation, and outputs.
-- **Confusing `tool_choice: "auto"` with required tool use.** `auto` allows tools; only `any` or a named tool guarantees a tool call.
+- **Confusing `auto` with required tool use.** `auto` allows tools; strict arguments do not guarantee a call. Check supported forcing options and verify required tool results before advancing.
 
 ### Original Example
 
@@ -464,6 +472,8 @@ A specific failure pattern: a strict enum without escape hatch fails when new ca
 
 ### Source Grounding and Provenance
 
+Evidence fields in your JSON schema are application-defined claims about the source, not Claude's native citation blocks. Verify those claims against the source. The API rejects requests that enable native citations alongside `output_config.format`; if you need both structured values and native citations, see the extraction pattern in the [citations documentation](https://platform.claude.com/docs/en/build-with-claude/citations).
+
 For high-stakes extraction, include provenance fields:
 
 ```json
@@ -497,7 +507,7 @@ JSON Schema, structured outputs, strict tool use, and Pydantic catch type, prese
 - Required citations exist in the source.
 - Fields are not copied into the wrong category (a duration is not an ingredient quantity, a competitor's specs are not the product's specs).
 
-When validation fails, do not blindly retry the same request. Send a correction request that includes the source document, the previous extraction, and the exact validation errors. This is much more effective than asking the model to "try again" — and far more effective than setting `temperature: 0`, which only removes variability without addressing the underlying mismatch.
+When semantic validation fails, do not blindly retry the same request. Send a correction request that includes the source document, the previous extraction, and the exact validation errors so Claude knows what must change.
 
 Example correction prompt structure:
 
@@ -2053,7 +2063,7 @@ An invoice-intake service asks Claude for data that downstream code inserts into
 
 A. Strengthen the instruction: "CRITICAL: never include any text besides the JSON object."
 B. Post-process replies with a regex that strips non-JSON content before parsing.
-C. Use structured outputs (`output_config.format`) or a forced extraction tool carrying the schema, then validate semantics in application code.
+C. Use structured outputs (`output_config.format`), check `stop_reason`, and validate the extracted values in application code before inserting them.
 D. Retry failed requests with the same prompt until parsing succeeds.
 
 ### Scenario 2 — One Tool to Manage Everything
