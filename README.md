@@ -28,6 +28,12 @@ Each section includes:
 
 Plus a **Study Strategy**, **Quick Reference Cheat Sheet**, and **Recommended Reading & Resources** with links to official documentation.
 
+## Exam Access and Registration
+
+Registration runs through the Anthropic Partner Academy and requires affiliation with a Claude Partner Network organization; there is no individual sign-up. Exams are delivered by [Pearson VUE](https://www.pearsonvue.com/us/en/anthropic.html) (online proctored or at a test center), the fee is $125 per attempt as of the mid-2026 exam guide, and the credential is valid for 12 months with a free on-time renewal.
+
+If you have no partner organization, the routes in are an employer that joins the [Claude Partner Network](https://claude.com/partners), a qualifying company of your own, or membership in an existing partner firm ([how the partner-firm route works](https://youraidept.com/network/claude-certification) — disclosure: maintained by YAID, a partner firm).
+
 ## Read the Guide
 
 **[exam-preparation-guide.md](exam-preparation-guide.md)**
