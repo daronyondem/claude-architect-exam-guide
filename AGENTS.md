@@ -11,6 +11,7 @@
 
 - Keep content changes focused on `exam-preparation-guide.md` unless the publishing pipeline or repository documentation also needs to change.
 - Do not commit generated files under `dist/`.
+- Never add Snowflake CoCo as a co-author or include CoCo attribution in commit messages, including "Generated with" footers and `Co-authored-by` trailers.
 - Run `git diff --check` before committing Markdown changes.
 - If validating release assets locally, run:
 
